@@ -1,0 +1,175 @@
+================================================================================
+Tehnolog Games v1.0 — ДОКУМЕНТАЦИЯ ДЛЯ РАЗРАБОТЧИКА
+Только для разработчика. Игрок этот файл не видит.
+================================================================================
+
+1. ПОЛНЫЙ СПИСОК КОМАНД
+--------------------------------------------------------------------------------
+Базовые:     /start, /help, /balance, /top, /report, /admins
+Экономика:  /refill, /donate, /ref
+Профиль:    /profile, /accaunt, /accountphoto, /accountinfo, /accountstatus,
+            /status, /checkaccount, /lvl, /lvlup, /lvlcheck, /vzortehnologa
+Игры:       /slot, /konopla, /kripta, /almaz, /chisla, /plsdon
+Управление: /cancel, /status
+Справка:    /helpgame <название>, /infoslot, /infokonopla, /infolucky
+Магазин:    /market, /tehnologmarket, /inventory
+Premium:    /premium, /timeprem, /effect, /kachalka
+Прочее:     /steal, /freedurev
+Админ:      /admin, /stats, /economy, /logs, /debug, /addadmin, /addmoder,
+            /ban, /unban, /deladmin, /adddenga и т.д.
+
+Регистрация роутеров: main.py → register_routers() (base, economy, premium, games, inventory, account, rofl, admin).
+
+
+2. ЧТО ДЕЛАЕТ КАЖДАЯ КОМАНДА
+--------------------------------------------------------------------------------
+/start          — приветствие, ссылка на /help (handlers/base.py)
+/help           — список команд без медиа (handlers/base.py)
+/balance        — фото bal.jpg + баланс, уровень, премиум (handlers/base.py)
+/top            — создатель, админы, модеры, топ-5 по балансу (handlers/base.py)
+/report         — репорт @DPOPTH (handlers/base.py)
+/admins         — список ролей (handlers/base.py)
+
+/refill         — +100 коинов, КД 2 ч; при КД — norefill.jpg (handlers/economy.py)
+/donate         — перевод коинов с комментарием (handlers/economy.py)
+Оплата налога   — callback pay_tax_ — списание, zl.jpg, сообщение «Технолог забрал налог» (handlers/economy.py)
+
+/profile        — user_id, баланс, статус, обращение, лига, MMR, достижения (handlers/account.py)
+/accaunt        — меню аккаунта, accaunt.jpg (handlers/account.py)
+/accountphoto   — аватарка (handlers/account.py)
+/accountinfo    — «о себе» (handlers/account.py)
+/accountstatus, /status — статусы; /status также «активная игра» (account + games)
+/checkaccount   — чужой профиль по @user (handlers/account.py)
+/lvl, /lvlup, /lvlcheck — уровни (handlers/account.py)
+/vzortehnologa  — vzor.jpg (handlers/account.py)
+
+/slot           — слоты: ставка 20, выигрыш 150 или проигрыш; 5.jpg / 1–4.jpg (handlers/games.py)
+/konopla        — ставка 30, выигрыш/проигрыш; konwin.jpg / kon.jpg (handlers/games.py)
+/kripta сумма   — Lucky Jet: множитель, «Забрать» до обвала; Startkripta, kriptawin, kriptalox (handlers/games.py)
+/almaz сумма    — копать/забрать/завершить; almaz.jpg, almazwin.jpg, almazlox.jpg (handlers/games.py)
+/chisla @user сумма — PvP дуэль; chisla.jpg, winchisla.jpg, loxchislo.jpg (handlers/games.py)
+/plsdon         — «задонать»; jail.jpg, otzhal.jpg, beg.jpg (handlers/games.py)
+/cancel         — отмена kripta (возврат ставки) или almaz (завершение) (handlers/games.py)
+/status         — активная игра: kripta или almaz (handlers/games.py)
+
+/helpgame       — правила игры по названию (GAME_HELP_TEXTS в handlers/games.py)
+/infoslot, /infokonopla, /infolucky — инфо об играх без процентов (handlers/games.py)
+
+/market         — зелья удачи, market.jpg (handlers/inventory.py)
+/tehnologmarket — игрушки, tehmarket.jpg (handlers/inventory.py)
+/inventory      — инвентарь, inventory.jpg (handlers/inventory.py)
+/freedurev      — одноразовый промокод, durev.jpg (handlers/inventory.py)
+
+/premium        — тарифы, prem.jpg (handlers/premium.py)
+/timeprem, /effect — покупка/эффекты (handlers/premium.py)
+/kachalka       — бафф кулдауна (handlers/premium.py)
+
+/steal          — кража 50 коинов, КД 24 ч, steal.jpg (handlers/rofl.py)
+
+/admin          — меню админки, только создатель (handlers/admin.py)
+/stats          — пользователи, игры, сумма балансов (handlers/admin.py)
+/economy        — оборот, налог, топ выигрышей/проигрышей (handlers/admin.py)
+/logs [N]       — последние N записей admin_game_logs (handlers/admin.py)
+/debug          — кол-во активных сессий kripta/almaz/plsdon (handlers/admin.py)
+/ban, /unban, /addadmin и т.д. — роли и баны (handlers/admin.py)
+
+
+3. КАКИЕ ИГРЫ ЧЕСТНЫЕ / АЗАРТНЫЕ
+--------------------------------------------------------------------------------
+В handlers/games.py:
+  GAMBLING_GAMES = {"slot", "konopla", "kripta", "almaz"}
+  Честные (не в этом множестве): chisla, plsdon и любые будущие «скилловые».
+
+MMR:
+  Азартные: победа +5, поражение -15.
+  Честные: победа +15, поражение -10.
+  Обновление: _update_mmr_and_achievements() после каждой игры.
+
+
+4. ГДЕ СЧИТАЕТСЯ ЭКОНОМИКА
+--------------------------------------------------------------------------------
+Баланс:        db.update_balance(), db.get_balance() (db.py)
+Списание:      services/balance.py — balance_service.subtract_balance()
+Начисление:    services/balance.py — balance_service.add_balance(), add_game_win()
+Перевод:       services/balance.py — balance_service.transfer_balance()
+Налог с выигрыша: внутри add_game_win() (TAX_ON_WIN_PERCENT / TAX_ON_WIN_PERCENT_PREMIUM)
+Периодический налог: middlewares.py — TaxMiddleware (раз в 4 ч, 1/4 баланса); оплата — economy.py callback pay_tax_.
+Конфиг:        config.py — TAX_PERCENTAGE, TAX_ON_WIN_PERCENT, MAX_WIN_PER_GAME, SLOT_BET, SLOT_WIN, KONOPLA_*, KRIPTA_*, PLSDON_*, REFILL_*, STEAL_* и т.д.
+
+
+5. ГДЕ ЛОГИРУЮТСЯ ДАННЫЕ
+--------------------------------------------------------------------------------
+Игры (админ):  db.log_admin_game() → таблица admin_game_logs (user_id, username, command, bet, result, balance_change, tax, created_at)
+Сессии игр:    db.log_game_session() → games_sessions (для MMR и достижений)
+Файл:          logs/bot.log (настройка в main.py setup_logging)
+Логирование налога: при установке налога (middlewares TaxMiddleware) и при оплате (economy callback) — logger.info
+Уведомления создателю: utils.notify_creator() при антиспаме, авто-бане, резком росте баланса, крупном выигрыше
+
+
+6. ГДЕ МЕНЯТЬ ШАНСЫ / ТАЙМИНГИ
+--------------------------------------------------------------------------------
+config.py:
+  SLOT_WIN_CHANCE, KONOPLA_WIN_CHANCE
+  KRIPTA_SURVIVE_X2_CHANCE, KRIPTA_SURVIVE_X3_CHANCE, KRIPTA_SURVIVE_X4_PLUS_FACTOR
+  KRIPTA_MULTIPLIER_INTERVAL, KRIPTA_MAX_MULTIPLIER
+  PLSDON_IGNORE_CHANCE, PLSDON_LOSS_CHANCE, PLSDON_WIN_CHANCE
+  TAX_INTERVAL_HOURS, TAX_PERCENTAGE
+  GAME_MAX_DURATION_SEC — в games/constants.py (180 сек)
+  REFILL_COOLDOWN, STEAL_COOLDOWN, PLSDON_COOLDOWN
+  ANTISPAM_*, MIN_DELAY_BETWEEN_ACTIONS, MAX_ACTIONS_PER_SECOND
+
+handlers/games.py:
+  ALMAZ_EXPLOSION_BASE, ALMAZ_EXPLOSION_INCREASE, ALMAZ_WIN_PER_DIG — для алмазов
+  Шансы в коде: calculate_win_chance_async() учитывает config.GAME_WIN_CHANCE_BONUS и effects_service
+
+
+7. ГДЕ ПОДКЛЮЧАЮТСЯ АССЕТЫ
+--------------------------------------------------------------------------------
+Пути:          config.IMAGES_DIR, config.AUDIO_DIR (config.py, по умолчанию assets/images, assets/audio)
+Получение:     config.get_image_path("filename.jpg"), config.get_game_image_path("slug", "start"|"win"|"lose")
+Проверка:      config.validate_assets() при старте бота (main.py on_startup) — логирует отсутствующие
+Поведение:     везде проверка path.exists(); если файла нет — отправляется только текст (без падения)
+Список файлов: config.validate_assets() — required_images, required_audio; полный список см. assets_required.txt
+
+
+8. КАК ДОБАВИТЬ НОВУЮ ИГРУ (ЧЕКЛИСТ)
+--------------------------------------------------------------------------------
+1) Решить: с ставкой или без; честная или азартная (для MMR).
+2) Добавить команду в handlers/games.py (Command("название")).
+3) Проверка баланса и списание через balance_service.subtract_balance() при ставке.
+4) Логика игры: кнопки (callback_data с user_id или session_id), таймер до GAME_MAX_DURATION_SEC.
+5) Выигрыш: balance_service.add_game_win() (учитывает налог и лимит).
+6) Проигрыш: баланс уже списан; при сбое — возврат через add_balance().
+7) db.log_game_session() и db.log_admin_game() после исхода.
+8) _update_mmr_and_achievements() если игра влияет на MMR.
+9) Картинки: по конвенции <game>.jpg, <game>win.jpg, <game>lose.jpg или свои имена через get_image_path().
+10) Добавить текст в GAME_HELP_TEXTS для /helpgame.
+11) Зарегистрировать в COMMISSION_EXEMPT в config.py если комиссия не должна списываться.
+12) set_command_cooldown() после успешного входа в игру (если нужен КД).
+13) Активная сессия: хранить в Dict в games.py (как _active_kripta_sessions); при /cancel и /status учитывать.
+14) Обновить README.md и developer.txt (список команд и игр).
+
+
+9. ТИПИЧНЫЕ ТОЧКИ БАГОВ
+--------------------------------------------------------------------------------
+— Двойное списание: убедиться, что ставка списывается один раз и при таймауте/отмене возвращается или результат фиксируется.
+— Кнопки: после нажатия убирать reply_markup (edit_message_* или reply_markup=None), иначе двойное нажатие.
+— Callback не того пользователя: проверять callback.from_user.id == target_user_id в callback_data.
+— Таймеры: asyncio.create_task на таймаут; при завершении игры удалять сессию из _active_*, чтобы таймаут не сработал повторно.
+— Баланс: не уходить в минус (allow_negative=False в subtract_balance).
+— Формулы и проценты: не показывать игроку; только в логах и конфиге.
+— Медиа: всегда проверять photo_path.exists(); иначе answer(caption) или send_message().
+
+
+10. СОВЕТЫ ПО МАСШТАБИРОВАНИЮ
+--------------------------------------------------------------------------------
+— БД: SQLite с WAL; при высокой нагрузке рассмотреть перенос на PostgreSQL (замена aiosqlite на asyncpg и адаптация db.py).
+— Сессии в памяти (_active_kripta_sessions и т.д.): при нескольких инстансах бота нужен общий store (Redis или БД).
+— Логи: ротация в main.py (RotatingFileHandler); при большом объёме — вынос в syslog или внешний сервис.
+— Антиспам/анти-абуз: пороги в config; при росте числа пользователей можно ужесточить MIN_DELAY_BETWEEN_ACTIONS и лимиты.
+— Медиа: раздача статики через CDN или отдельный сервер не требуется — Telegram сам кэширует файлы по file_id (при отправке по пути бот каждый раз загружает файл).
+— Разделение ботов: код уже разделён на роутеры (игры/экономика/профиль — Tehnolog Games; медиа/подарки можно вынести во второй бот); общая БД или API между ботами при необходимости.
+
+================================================================================
+Конец developer.txt
+================================================================================

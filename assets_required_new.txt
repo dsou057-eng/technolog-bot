@@ -1,0 +1,27 @@
+# Недостающие ассеты для новых фич Tehnolog Games
+# Положить в assets/images/
+
+# Новости /news
+news_good.jpg
+news_bad.jpg
+news_neutral.jpg
+
+# Реклама (каждые 60 команд, 3 мин блок)
+ads.jpg
+ads_thanks.jpg
+
+# Русская рулетка /rulet
+rulet.jpg
+rulet_out.jpg
+rulet_win.jpg
+
+# Фреказ /frekaz
+frekaz.jpg
+frekaz_win.jpg
+frekaz_lose.jpg
+
+# Перекуп /perekyp
+perekup.jpg
+perekupwin.jpg
+perekuplose.jpg
+perekuptorg.jpg

@@ -1,0 +1,49 @@
+# Tehnolog Games v1.0 — медиа-ассеты
+# Путь: assets/images/ (.jpg), assets/audio/ (.ogg, .mp3)
+# Если файла нет — бот отправляет только текст (падений нет).
+# Отметь ✔ если файл есть, ❌ если нет. При старте бота см. логи (validate_assets).
+
+# ---------- ИГРЫ ----------
+# slot
+#   1.jpg
+#   2.jpg
+#   3.jpg
+#   4.jpg
+#   5.jpg
+# konopla
+#   kon.jpg
+#   konwin.jpg
+# kripta (Lucky Jet)
+#   Startkripta.jpg
+#   kripta.jpg
+#   kriptalox.jpg
+#   kriptawin.jpg
+# almaz
+#   almaz.jpg
+#   almazwin.jpg
+#   almazlox.jpg
+# plsdon
+#   jail.jpg
+#   otzhal.jpg
+#   beg.jpg
+# chisla (PvP)
+#   chisla.jpg
+#   winchisla.jpg
+#   loxchislo.jpg
+
+# ---------- ЭКОНОМИКА И БАЛАНС ----------
+# bal.jpg  refill.jpg  norefill.jpg  zl.jpg
+
+# ---------- PREMIUM И МАГАЗИН ----------
+# prem.jpg  kupprem.jpg  market.jpg  tehmarket.jpg  inventory.jpg
+# zelia.jpg  mishka.jpg  otvertka.jpg  kluch32.jpg  status.jpg  gift.jpg  durev.jpg
+
+# ---------- АККАУНТ И ПРОЧЕЕ ----------
+# accaunt.jpg  vzor.jpg  steal.jpg  dostavka.jpg  Ban.jpg
+
+# ---------- АУДИО (медиа-команды) ----------
+# cityboy.ogg  ignat.ogg  dostavka.mp3  audio_dexter.mp3
+
+# ---------- КОНВЕНЦИЯ ДЛЯ НОВЫХ ИГР ----------
+# <game>.jpg  <game>win.jpg  <game>lose.jpg
+# Код: config.get_game_image_path("slug", "start"|"win"|"lose")
