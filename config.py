@@ -95,11 +95,11 @@ class Config(BaseSettings):
     
     # Экономика
     DEFAULT_COMMISSION: int = 5  # комиссия за команды (коины)
-    FREE_COMMANDS: list = ["/help", "/start", "/helpgame", "/balance", "/refill", "/donate", "/top", "/admins", "/report", "/news"]
+    FREE_COMMANDS: list = ["/help", "/start", "/helpgame", "/balance", "/refill", "/donate", "/top", "/admins", "/report", "/news", "/obnova"]
     # Игровые команды, меню, профиль, медиа — комиссию не списываем
     COMMISSION_EXEMPT: list = [
         "/slot", "/konopla", "/kripta", "/plsdon", "/chisla", "/freedurev", "/almaz",
-        "/news", "/rulet", "/frekaz", "/perekyp",
+        "/news", "/rulet", "/frekaz", "/perekyp", "/pererozhd", "/birzh", "/obnova",
         "/helpgame", "/infoslot", "/infokonopla", "/infolucky",
         "/cancel", "/status", "/debug",
         "/reactor", "/vault", "/dicepath", "/overheat", "/mindlock", "/bombline", "/liftx", "/doza",
@@ -109,7 +109,7 @@ class Config(BaseSettings):
         "/storm", "/navigator", "/icepath", "/coinstack", "/target", "/fuse", "/web", "/logicgate",
         "/depth", "/field", "/ritual", "/trace",
         "/accaunt", "/accountphoto", "/accountobrosh", "/accountinfo", "/accountstatus",
-        "/status", "/checkaccount", "/lvl", "/lvlup", "/lvlcheck", "/vzortehnologa",
+        "/status", "/statusmarket", "/checkaccount", "/lvl", "/lvlup", "/lvlcheck", "/vzortehnologa",
         "/market", "/tehnologmarket", "/inventory", "/premium", "/timeprem", "/effect",
         "/kachalka", "/steal", "/sperm", "/skinna0", "/dostavka",
         "/olegtemni", "/detimoi", "/deniska", "/kb", "/oleg", "/cam1", "/cam2", "/cam3", "/cam4", "/cam5",
@@ -200,11 +200,11 @@ class Config(BaseSettings):
     PEREKYP_SCROLL_MAX: int = 15  # лимит пролистываний
     PEREKYP_PRICE_MIN: float = 0.85  # цена объявления от суммы (мин)
     PEREKYP_PRICE_MAX: float = 1.15  # цена объявления от суммы (макс)
-    PEREKYP_BUY_WIN_CHANCE: float = 0.45  # шанс успешной перепродажи при «Купить»
+    PEREKYP_BUY_WIN_CHANCE: float = 0.38  # шанс успешной перепродажи при «Купить» (снижено против фарма)
     PEREKYP_TORG_WIN_CHANCE: float = 0.78  # шанс успеха торга (значительно выше)
     PEREKYP_TORG_DISCOUNT: float = 0.85  # после успешного торга цена *= это
-    PEREKYP_WIN_MULT_MIN: float = 1.5
-    PEREKYP_WIN_MULT_MAX: float = 5.0
+    PEREKYP_WIN_MULT_MIN: float = 1.3
+    PEREKYP_WIN_MULT_MAX: float = 3.2
 
     # Магазины
     POTION_PRICES: dict = {
@@ -463,6 +463,21 @@ class Config(BaseSettings):
                 missing["audio"].append(audio)
         
         return missing
+
+    # Текст для /obnova — что добавлено и урезано в обновлении (без закулисья, только для игроков)
+    OBNOVA_LINES: List[str] = [
+        "📋 <b>Обновление</b>\n",
+        "✅ <b>Добавлено:</b>",
+        "• Магазин статусов — /statusmarket (Богач, Хомяк, Пубертат страны и др.).",
+        "• /status — только проверка активной игры (Lucky Jet, Алмазы и т.д.).",
+        "• В /birzh — курс технолог-коина в рублях (от 0,1 до 3 ₽).",
+        "• В итогах игр бот обращается к тебе так, как в профиле (царь батюшка, дружок и т.д.).",
+        "• /obnova — что нового и что урезали.",
+        "• Прогресс до топ-лиги: нужны разные игры и минимум 60 игр; одна и та же тактика даёт меньше MMR.",
+        "",
+        "✂️ <b>Урезано/изменено:</b>",
+        "• Покупка статусов только через /statusmarket.",
+    ]
 
 
 # Глобальный экземпляр настроек

@@ -161,18 +161,13 @@ class EffectsService:
     
     async def get_luck_multiplier(self, user_id: int) -> float:
         """
-        Получение множителя удачи для игр (только зелья)
-        Зелья удачи умножают шанс выигрыша
-        
-        Args:
-            user_id: ID пользователя
-            
-        Returns:
-            Множитель удачи от зелий (1.0 = без зелий)
+        Получение множителя удачи для игр: зелья + бонус перерождений (+0.5x за каждое).
         """
-        # Проверяем зелья удачи
         potion_multiplier = await self.get_effect_multiplier(user_id, "potion")
-        return potion_multiplier if potion_multiplier > 1.0 else 1.0
+        base = potion_multiplier if potion_multiplier > 1.0 else 1.0
+        rebirth_count = await db.get_rebirth_count(user_id)
+        rebirth_bonus = 1.0 + rebirth_count * 0.5
+        return base * rebirth_bonus
     
     async def get_price_discount(self, user_id: int) -> float:
         """

@@ -24,10 +24,26 @@ EVENT_DURATION = 1800  # 30 мин
 SHADOW_CHANCE = 0.06
 
 # Игроку показываем только атмосферу и короткий намёк на эффект (без формул и закулисья)
+# MMR-ивенты: короткий бафф за выигрыш (шанс срабатывает при росте MMR)
+MMR_LUCKY_DURATION = 60  # 1 минута
+MMR_LUCKY_CHANCE = 0.12  # 12% шанс выпасть после выигрыша
+
 EVENT_TEXTS = {
     "gambling": (
         "🔥 <b>Ты сегодня в ударе.</b>\n\n"
         "Удача благосклонна к смелым ставкам — но проигрыш может ударить сильнее. Играй осознанно."
+    ),
+    "lucky_80": (
+        "🍀 <b>Ветер удачи!</b>\n\n"
+        "Твои шансы на победу в любой игре повышены до ~80% на 1 минуту. Успей сыграть!"
+    ),
+    "lucky_mult": (
+        "📈 <b>Множитель удачи.</b>\n\n"
+        "Выигрыши в любой игре дают x1.2 к множителю в течение 1 минуты. Лови момент!"
+    ),
+    "lucky_taxfree": (
+        "🛡️ <b>Налоговая каникула.</b>\n\n"
+        "Следующий выигрыш без налога Технолога. Действует 1 минуту."
     ),
     "meme": (
         "🎲 <b>Что-то пошло не по плану.</b>\n\n"
@@ -46,6 +62,9 @@ EVENT_TEXTS = {
 
 EVENT_IMAGES = {
     "gambling": "event_hot.jpg",
+    "lucky_80": "event_hot.jpg",
+    "lucky_mult": "event_hot.jpg",
+    "lucky_taxfree": "event_hot.jpg",
     "meme": "event_meme.jpg",
     "antigreed": "event_hot.jpg",  # можно заменить на event_antigreed.jpg
     "save": "event_save.jpg",
@@ -141,26 +160,52 @@ class EventsService:
         path = config.get_image_path(img_name)
         return (text, img_name, path)
 
+    async def try_trigger_mmr_lucky_event(
+        self, user_id: int, new_mmr: int, chat_id: int, bot
+    ) -> Optional[Tuple[str, str, Path]]:
+        """
+        После выигрыша с некоторой вероятностью выдать короткий бафф (80% шанс, x1.2 множ и т.д.).
+        Чем выше MMR/лига — тем чуть выше шанс. Возвращает (text, img_name, path) для отправки или None.
+        """
+        if random.random() > MMR_LUCKY_CHANCE:
+            return None
+        active = await self.get_active_event(user_id)
+        if active:
+            return None
+        choices = ["lucky_80", "lucky_mult"]
+        if new_mmr >= 500:
+            choices.append("lucky_taxfree")
+        event_type = random.choice(choices)
+        await self.set_event(user_id, event_type, MMR_LUCKY_DURATION)
+        text = EVENT_TEXTS.get(event_type, "")
+        img_name = EVENT_IMAGES.get(event_type, "event_hot.jpg")
+        path = config.get_image_path(img_name)
+        return (text, img_name, path)
+
     def apply_event_to_win_chance(self, base_chance: float, event_type: Optional[str]) -> float:
         """Модификатор шанса выигрыша от активного ивента."""
         if not event_type:
             return base_chance
+        if event_type == "lucky_80":
+            return min(1.0, 0.80)  # ~80% в любой игре
         if event_type == "gambling":
             return min(1.0, base_chance + 0.08)
         if event_type == "save":
             return min(1.0, base_chance + 0.06)
         if event_type == "antigreed":
-            return max(0.0, base_chance - 0.04)  # понижаем гипер-выигрыши через шанс
+            return max(0.0, base_chance - 0.04)
         if event_type == "meme":
-            return base_chance  # мем — через особые исходы в коде, не через шанс
+            return base_chance
         if event_type == "shadow":
-            return base_chance + 0.02  # лёгкий скрытый плюс
+            return base_chance + 0.02
         return base_chance
 
     def apply_event_to_multiplier(self, mult: float, event_type: Optional[str], is_win: bool) -> float:
-        """Модификатор множителя от ивента (азартный + к выигрышу, анти-жадный — понижаем)."""
+        """Модификатор множителя от ивента."""
         if not event_type:
             return mult
+        if event_type == "lucky_mult" and is_win:
+            return mult * 1.2
         if event_type == "gambling" and is_win:
             return mult * 1.15
         if event_type == "antigreed" and is_win:

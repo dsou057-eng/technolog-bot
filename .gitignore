@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Виртуальное окружение
+venv/
+.venv/
+env/
+.env/
+
+# База данных (локальные данные — на сервере своя БД)
+*.db
+*.db-shm
+*.db-wal
+
+# Логи
+logs/
+*.log
+
+# IDE / редактор
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Переменные окружения (токены, секреты)
+.env
+.env.local
+.env.*.local

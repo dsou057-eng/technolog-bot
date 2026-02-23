@@ -161,6 +161,22 @@ async def format_message_vip_async(text: str, user_id: int) -> str:
     return f"{user_tag}, {text}"
 
 
+async def format_message_game_result_async(text: str, user_id: int) -> str:
+    """
+    Для итогов игр: @user, царь батюшка, извольте молвить — вы выиграли / вы проиграли и т.д.
+    Использует обращение из профиля (bot_address / vip_address).
+    """
+    from db import db
+    profile = await db.get_profile(user_id)
+    bot_address = profile.get("bot_address") or profile.get("vip_address") if profile else None
+    user = await db.get_user(user_id)
+    username = user.get("username") if user else None
+    user_tag = f"@{username}" if username else f"ID{user_id}"
+    if bot_address:
+        return f"{user_tag}, {bot_address}, извольте молвить — {text}"
+    return f"{user_tag}, извольте молвить — {text}"
+
+
 # Единственный источник создателя: @DPOPTH. Кэш для разрешения по username.
 _creator_id_cache: Optional[int] = None
 

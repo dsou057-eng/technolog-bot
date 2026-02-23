@@ -380,6 +380,9 @@ class BalanceService:
             is_premium = await db.is_premium(user_id)
         tax_rate = getattr(config, "TAX_ON_WIN_PERCENT_PREMIUM", 0.02) if is_premium else getattr(config, "TAX_ON_WIN_PERCENT", 0.05)
         tax = int(capped * tax_rate)
+        ev = await db.get_active_event(user_id)
+        if ev and ev.get("event_type") == "lucky_taxfree":
+            tax = 0
         net = int(capped - tax)
         if net <= 0:
             return False, 0, 0, 0

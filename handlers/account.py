@@ -52,9 +52,25 @@ async def cmd_profile(message: Message):
     stats = await db.get_user_game_stats(user_id)
     bot_address = profile.get("bot_address") or profile.get("vip_address") or "дружок"
     mmr = await db.get_user_mmr(user_id)
-    league = db.get_league_by_mmr(mmr)
+    league_info = db.get_league_info(mmr)
     achievements = await db.get_user_achievements(user_id)
+    total_games = await db.get_total_games_count(user_id)
+    min_games_legend = getattr(db, "MMR_MIN_GAMES_FOR_LEGEND", 60)
 
+    # Прогресс-бар внутри лиги (5 блоков)
+    p = league_info["progress"]
+    filled = int(round(p * 5))
+    bar = "■" * filled + "□" * (5 - filled)
+    league_line = f"📊 {league_info['name']} — <b>{mmr}</b> MMR ({league_info['low']}–{league_info['high']})"
+    progress_line = f"   [{bar}] {int(p * 100)}% по лиге"
+    goal_parts = ["🎯 <b>Цель:</b> дойти до 🟡 Легенда"]
+    if league_info["to_next_league"] is not None:
+        goal_parts.append(f"📈 До следующей лиги: <b>{league_info['to_next_league']}</b> MMR")
+    else:
+        goal_parts.append("🏆 Ты в высшей лиге — дерзай в топ!")
+    if mmr < 2000 and total_games < min_games_legend:
+        goal_parts.append(f"📋 До Легенды нужно <b>{min_games_legend}</b> игр (сыграно: <b>{total_games}</b>)")
+    goal_line = "\n".join(goal_parts)
     lines = [
         f"👤 <b>ПРОФИЛЬ</b>",
         f"@{username or first_name or 'user'}",
@@ -63,7 +79,9 @@ async def cmd_profile(message: Message):
         f"🏷️ Статус: {user.get('status') or 'нет'}",
         f"💬 Как обращаюсь: <i>{bot_address}</i>",
         f"",
-        f"📊 Лига: {league} (MMR: {mmr})",
+        league_line,
+        progress_line,
+        goal_line,
         f"🎮 Игр: <b>{stats['total']}</b> (побед: {stats['wins']}, поражений: {stats['losses']})",
     ]
     if achievements:
@@ -152,8 +170,8 @@ async def cmd_accaunt(message: Message):
         "/accountphoto — загрузка аватарки\n"
         "/accountobrosh — VIP-обращение (как бот зовёт тебя)\n"
         "/accountinfo — описание «о себе»\n"
-        "/accountstatus — выбор/покупка статуса\n"
-        "/status — магазин статусов\n"
+        "/accountstatus — текущий статус и ссылка на магазин\n"
+        "/statusmarket — магазин статусов (Богач, Пубертат страны и т.д.)\n"
         "/checkaccount @user — чужой профиль\n"
         "/lvl — твой уровень\n"
         "/lvlup — повысить уровень\n"
@@ -303,7 +321,7 @@ async def cmd_accountstatus(message: Message):
 
     current = user.get("status") or "нет"
     statuses = await db.get_all_statuses()
-    lines = [f"Текущий статус: {current}\n", "Купить в /status:"]
+    lines = [f"Текущий статус: {current}\n", "Купить в /statusmarket:"]
     for s in statuses:
         lines.append(f"• {s['status_name']} — {s['price']} коинов")
     sent = await message.answer(
@@ -312,9 +330,9 @@ async def cmd_accountstatus(message: Message):
     asyncio.create_task(delete_message_after(sent))
 
 
-@router.message(Command("status"))
-async def cmd_status(message: Message):
-    """Магазин статусов — status.jpg, покупка и установка. Обращение: @user, царь/дружок, текст."""
+@router.message(Command("statusmarket"))
+async def cmd_statusmarket(message: Message):
+    """Магазин статусов (Богач, Хомяк, Пубертат страны и т.д.) — покупка и установка. Обращение: @user, царь/дружок."""
     user_id = message.from_user.id
     username = message.from_user.username
     first_name = message.from_user.first_name
@@ -335,7 +353,8 @@ async def cmd_status(message: Message):
         )] for i, s in enumerate(statuses)
     ])
     caption = format_message_with_username(
-        f"{bot_address}, 🏷️ <b>МАГАЗИН СТАТУСОВ</b>\n\nБогач, Хомяк, Легенда, Потужномэн, Главный пубертат страны, Технолог — по 5000 коинов.",
+        f"{bot_address}, 🏷️ <b>МАГАЗИН СТАТУСОВ</b>\n\n"
+        f"Богач, Хомяк, Легенда, Потужномэн, Главный пубертат страны, Технолог и др. — покупай и носи в профиле.",
         username, first_name
     )
     photo_path = config.get_image_path("status.jpg")
@@ -345,7 +364,7 @@ async def cmd_status(message: Message):
         else:
             sent = await message.answer(caption, reply_markup=keyboard)
     except Exception as e:
-        logger.error(f"status photo {e}")
+        logger.error(f"statusmarket photo {e}")
         sent = await message.answer(caption, reply_markup=keyboard)
     asyncio.create_task(delete_message_after(sent))
 
@@ -381,7 +400,7 @@ async def cb_buy_status(callback: CallbackQuery):
 
     success, _, _, err = await balance_service.subtract_balance(
         user_id=cb_user_id, amount=price,
-        command_source="/status", comment=f"Покупка статуса {status_name}",
+        command_source="/statusmarket", comment=f"Покупка статуса {status_name}",
         bot=callback.bot, chat_id=callback.message.chat.id,
         username=callback.from_user.username, first_name=callback.from_user.first_name,
         allow_negative=False
@@ -433,6 +452,7 @@ async def cmd_checkaccount(message: Message):
 
     target = await db.get_user(target_id)
     profile = await db.get_profile(target_id)
+    stats = await db.get_user_game_stats(target_id)
     t_username = target.get("username") or str(target_id)
     balance = target.get("balance", 0)
     level = target.get("level", 1)
@@ -441,12 +461,19 @@ async def cmd_checkaccount(message: Message):
     prem = "👑 Premium" if is_premium else "—"
     about = (profile.get("about_info") or "—")[:200]
     vip_addr = profile.get("vip_address") or "—"
+    mmr = await db.get_user_mmr(target_id)
+    league_info = db.get_league_info(mmr)
+    p = league_info["progress"]
+    filled = int(round(p * 5))
+    bar = "■" * filled + "□" * (5 - filled)
 
     text = (
         f"👤 @{t_username}\n"
         f"💰 Баланс: {balance} | LVL: {level}\n"
         f"🏷️ Статус: {status} | {prem}\n"
         f"Обращение: {vip_addr}\n"
+        f"📊 {league_info['name']} — {mmr} MMR [{bar}]\n"
+        f"🎮 Игр: {stats['total']} (побед: {stats['wins']}, поражений: {stats['losses']})\n"
         f"О себе: {about}"
     )
     caption = format_message_with_username(text, username, first_name)

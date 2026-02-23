@@ -48,11 +48,47 @@ async def cmd_admin(message: Message):
         "/stats — общая статистика бота (пользователи, игры, баланс)\n"
         "/economy — оборот, налог Технолога, топ выигрышей и проигрышей\n"
         "/logs [N] — последние N записей логов игр (по умолчанию 30)\n\n"
-        "Роли и баны: /addadmin, /addmoder, /ban, /unban, /deladmin и т.д.",
+        "Роли и баны: /addadmin, /addmoder, /ban, /unban, /deladmin и т.д.\n\n"
+        "/skinna0 @user — сброс баланса на 0 за жульничество (только создатель)",
         username, first_name
     )
     sent = await message.answer(text)
     asyncio.create_task(delete_message_after(sent, config.MESSAGE_DELETE_TIMEOUT))
+
+
+@router.message(Command("skinna0"))
+async def cmd_skinna0(message: Message):
+    """Анти-жульничество: сброс баланса цели на 0. Только создатель."""
+    if not await _is_creator(message.from_user.id, message.from_user.username):
+        return
+    parts = (message.text or "").strip().split(maxsplit=1)
+    if len(parts) < 2:
+        sent = await message.answer("Использование: /skinna0 @username или /skinna0 user_id")
+        asyncio.create_task(delete_message_after(sent, config.MESSAGE_DELETE_TIMEOUT))
+        return
+    target_str = parts[1].strip().lstrip("@")
+    target_id = None
+    if target_str.isdigit():
+        target_id = int(target_str)
+    else:
+        target_id = await db.get_user_id_by_username(target_str)
+    if not target_id:
+        sent = await message.answer("Пользователь не найден.")
+        asyncio.create_task(delete_message_after(sent, config.MESSAGE_DELETE_TIMEOUT))
+        return
+    if config.CREATOR_ID and target_id == config.CREATOR_ID:
+        sent = await message.answer("Создателя скинуть нельзя.")
+        asyncio.create_task(delete_message_after(sent, config.MESSAGE_DELETE_TIMEOUT))
+        return
+    balance_before = await db.get_balance(target_id)
+    await db.set_balance_direct(target_id, 0)
+    target_user = await db.get_user(target_id)
+    target_name = f"@{target_user.get('username') or target_id}" if target_user else str(target_id)
+    sent = await message.answer(
+        f"⚠️ Баланс {target_name} сброшен на 0 (было {balance_before:,} коинов). За жульничество."
+    )
+    asyncio.create_task(delete_message_after(sent, config.MESSAGE_DELETE_TIMEOUT))
+    logger.info("skinna0: target_id=%s balance_was=%s by creator", target_id, balance_before)
 
 
 @router.message(Command("stats"))

@@ -8,7 +8,7 @@ import logging
 import time
 
 from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery, FSInputFile
+from aiogram.types import Message, CallbackQuery, FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command
 
 from config import config
@@ -164,6 +164,56 @@ async def cmd_refill(message: Message):
     asyncio.create_task(delete_message_after(sent_message))
     
     logger.info(f"Пользователь {user_id} использовал /refill (+{refill_amount} коинов, баланс: {balance_after})")
+
+
+@router.message(Command("pererozhd"))
+async def cmd_pererozhd(message: Message):
+    """
+    Перерождение: сброс баланса на 0, +0.5x к удаче за каждое.
+    Первое — 1M коинов, каждое следующее в 2 раза дороже.
+    """
+    user_id = message.from_user.id
+    username = message.from_user.username
+    first_name = message.from_user.first_name
+
+    user = await db.get_user(user_id)
+    if not user:
+        await db.create_user(user_id, username)
+    cost = await db.get_rebirth_cost(user_id)
+    count = await db.get_rebirth_count(user_id)
+    balance = await db.get_balance(user_id)
+
+    if balance < cost:
+        text = format_message_with_username(
+            f"🔄 <b>Перерождение</b>\n\n"
+            f"Следующее перерождение стоит <b>{cost:,}</b> коинов.\n"
+            f"У тебя: <b>{balance:,}</b>.\n\n"
+            f"Перерождений: <b>{count}</b> (+0.5x удачи за каждое).",
+            username, first_name
+        )
+        sent = await message.answer(text)
+        asyncio.create_task(delete_message_after(sent, config.MESSAGE_DELETE_TIMEOUT))
+        return
+
+    ok, new_count, err = await db.do_rebirth(user_id)
+    if not ok:
+        sent = await message.answer(format_message_with_username(err, username, first_name))
+        asyncio.create_task(delete_message_after(sent, config.MESSAGE_DELETE_TIMEOUT))
+        return
+
+    luck_bonus = 1.0 + new_count * 0.5
+    text = format_message_with_username(
+        f"🔄 <b>Перерождение #{new_count}</b>\n\n"
+        f"Баланс обнулён. Бонус удачи: <b>+{(new_count * 0.5):.1f}x</b> (итого x{luck_bonus:.1f}).\n\n"
+        f"Следующее перерождение: <b>{await db.get_rebirth_cost(user_id):,}</b> коинов.",
+        username, first_name
+    )
+    if new_count == 1:
+        await db.unlock_achievement(user_id, "rebirth_first")
+        text += "\n\n🔄 <b>Достижение:</b> Первое перерождение!"
+    sent = await message.answer(text)
+    asyncio.create_task(delete_message_after(sent, config.MESSAGE_DELETE_TIMEOUT))
+    logger.info("pererozhd: user_id=%s rebirth_count=%s", user_id, new_count)
 
 
 @router.callback_query(F.data.startswith("pay_tax_"))
@@ -545,3 +595,158 @@ async def cmd_ref(message: Message):
     sent = await message.answer(msg)
     asyncio.create_task(delete_message_after(sent))
     logger.info(f"Ref code {code_raw} activated by {user_id}")
+
+
+# ---------- /birzh — биржа шарага-коинов (цена 1–100, купить/продать по 100) ----------
+
+def _birzh_caption(price: int, sharaga: int, balance: int, technolog_rub: float, username: str, first_name: str) -> str:
+    return format_message_with_username(
+        f"📈 <b>Биржа Технолог-коина</b>\n\n"
+        f"💰 Шарага-коин: <b>{price}</b> коинов за 100 шарага (курс 1–100)\n"
+        f"💵 Технолог-коин: <b>{technolog_rub:.1f}</b> ₽ (от 0.1 до 3 ₽)\n"
+        f"🪙 Твои шарага-коины: <b>{sharaga}</b>\n"
+        f"💵 Баланс: <b>{balance}</b> коинов\n\n"
+        f"Купи/продай по 100 шарага по текущей цене. Обнови курс — обновятся оба курса.",
+        username, first_name
+    )
+
+
+@router.message(Command("birzh"))
+async def cmd_birzh(message: Message):
+    """Биржа: цена шарага-коина меняется в реальном времени (1–100). Купить/продать по 100."""
+    user_id = message.from_user.id
+    username = message.from_user.username or ""
+    first_name = message.from_user.first_name or ""
+
+    user = await db.get_user(user_id)
+    if not user:
+        await db.create_user(user_id, username)
+
+    price, _, technolog_rub = await db.get_birzh_price()
+    sharaga = await db.get_user_sharaga(user_id)
+    balance = await db.get_balance(user_id)
+
+    caption = _birzh_caption(price, sharaga, balance, technolog_rub, username, first_name)
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="Купить 100 шарага", callback_data=f"birzh_buy|{user_id}"),
+            InlineKeyboardButton(text="Продать 100 шарага", callback_data=f"birzh_sell|{user_id}"),
+        ],
+        [InlineKeyboardButton(text="🔄 Обновить курс", callback_data=f"birzh_refresh|{user_id}")],
+    ])
+    photo_path = config.get_image_path("birzh.jpg")
+    try:
+        if photo_path.exists():
+            sent = await message.answer_photo(FSInputFile(str(photo_path)), caption=caption, reply_markup=keyboard)
+        else:
+            sent = await message.answer(caption, reply_markup=keyboard)
+    except Exception:
+        sent = await message.answer(caption, reply_markup=keyboard)
+    asyncio.create_task(delete_message_after(sent, config.MESSAGE_DELETE_TIMEOUT))
+
+
+@router.callback_query(F.data.startswith("birzh_buy|"))
+async def cb_birzh_buy(callback: CallbackQuery):
+    data = callback.data
+    if not data.startswith("birzh_buy|"):
+        return
+    try:
+        uid = int(data.split("|")[1])
+    except (IndexError, ValueError):
+        await callback.answer("Ошибка", show_alert=True)
+        return
+    if callback.from_user.id != uid:
+        await callback.answer("Не твоя кнопка", show_alert=True)
+        return
+    price, _, technolog_rub = await db.get_birzh_price()
+    ok = await db.birzh_buy_100(uid, price)
+    if not ok:
+        await callback.answer(f"Нужно {price} коинов. Не хватает.", show_alert=True)
+        return
+    sharaga = await db.get_user_sharaga(uid)
+    balance = await db.get_balance(uid)
+    un = callback.from_user.username or ""
+    fn = callback.from_user.first_name or ""
+    caption = _birzh_caption(price, sharaga, balance, technolog_rub, un, fn)
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="Купить 100 шарага", callback_data=f"birzh_buy|{uid}"),
+            InlineKeyboardButton(text="Продать 100 шарага", callback_data=f"birzh_sell|{uid}"),
+        ],
+        [InlineKeyboardButton(text="🔄 Обновить курс", callback_data=f"birzh_refresh|{uid}")],
+    ])
+    try:
+        await callback.message.edit_caption(caption=caption, reply_markup=keyboard)
+    except Exception:
+        await callback.message.edit_text(caption, reply_markup=keyboard)
+    await callback.answer(f"Куплено 100 шарага за {price} коинов ✅")
+
+
+@router.callback_query(F.data.startswith("birzh_sell|"))
+async def cb_birzh_sell(callback: CallbackQuery):
+    data = callback.data
+    if not data.startswith("birzh_sell|"):
+        return
+    try:
+        uid = int(data.split("|")[1])
+    except (IndexError, ValueError):
+        await callback.answer("Ошибка", show_alert=True)
+        return
+    if callback.from_user.id != uid:
+        await callback.answer("Не твоя кнопка", show_alert=True)
+        return
+    price, _, technolog_rub = await db.get_birzh_price()
+    ok = await db.birzh_sell_100(uid, price)
+    if not ok:
+        await callback.answer("Нужно минимум 100 шарага-коинов.", show_alert=True)
+        return
+    sharaga = await db.get_user_sharaga(uid)
+    balance = await db.get_balance(uid)
+    un = callback.from_user.username or ""
+    fn = callback.from_user.first_name or ""
+    caption = _birzh_caption(price, sharaga, balance, technolog_rub, un, fn)
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="Купить 100 шарага", callback_data=f"birzh_buy|{uid}"),
+            InlineKeyboardButton(text="Продать 100 шарага", callback_data=f"birzh_sell|{uid}"),
+        ],
+        [InlineKeyboardButton(text="🔄 Обновить курс", callback_data=f"birzh_refresh|{uid}")],
+    ])
+    try:
+        await callback.message.edit_caption(caption=caption, reply_markup=keyboard)
+    except Exception:
+        await callback.message.edit_text(caption, reply_markup=keyboard)
+    await callback.answer(f"Продано 100 шарага за {price} коинов ✅")
+
+
+@router.callback_query(F.data.startswith("birzh_refresh|"))
+async def cb_birzh_refresh(callback: CallbackQuery):
+    data = callback.data
+    if not data.startswith("birzh_refresh|"):
+        return
+    try:
+        uid = int(data.split("|")[1])
+    except (IndexError, ValueError):
+        await callback.answer("Ошибка", show_alert=True)
+        return
+    if callback.from_user.id != uid:
+        await callback.answer("Не твоя кнопка", show_alert=True)
+        return
+    price, _, technolog_rub = await db.get_birzh_price()
+    sharaga = await db.get_user_sharaga(uid)
+    balance = await db.get_balance(uid)
+    un = callback.from_user.username or ""
+    fn = callback.from_user.first_name or ""
+    caption = _birzh_caption(price, sharaga, balance, technolog_rub, un, fn)
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="Купить 100 шарага", callback_data=f"birzh_buy|{uid}"),
+            InlineKeyboardButton(text="Продать 100 шарага", callback_data=f"birzh_sell|{uid}"),
+        ],
+        [InlineKeyboardButton(text="🔄 Обновить курс", callback_data=f"birzh_refresh|{uid}")],
+    ])
+    try:
+        await callback.message.edit_caption(caption=caption, reply_markup=keyboard)
+    except Exception:
+        await callback.message.edit_text(caption, reply_markup=keyboard)
+    await callback.answer(f"Курс обновлён: {price} коинов за 100 шарага")

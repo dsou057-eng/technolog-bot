@@ -20,7 +20,7 @@ from aiogram.exceptions import TelegramBadRequest
 
 from config import config
 from db import db
-from utils import delete_message_after, delete_message_after_by_id, format_message_with_username, format_insufficient_balance, format_game_error, resolve_recipient_from_message
+from utils import delete_message_after, delete_message_after_by_id, format_message_with_username, format_message_game_result_async, format_insufficient_balance, format_game_error, resolve_recipient_from_message
 from games.rng import game_random
 from games.constants import GAME_MAX_DURATION_SEC
 from games.fracture_questions import FRACTURE_QUESTIONS_POOL
@@ -86,14 +86,17 @@ async def _safe_callback_answer(callback: CallbackQuery, text: str = "", show_al
         pass
 
 
-async def _update_mmr_and_achievements(user_id: int, game_type: str, result: str, balance_after: int):
-    """Обновить MMR и проверить достижения после игры."""
+async def _update_mmr_and_achievements(
+    user_id: int, game_type: str, result: str, balance_after: int,
+    chat_id: Optional[int] = None, bot = None
+):
+    """Обновить MMR и проверить достижения после игры. При выигрыше может выпасть MMR-ивент (80% шанс, x1.2 множ)."""
     is_gambling = game_type in GAMBLING_GAMES
     if result == "win":
         delta = MMR_WIN_GAMBLING if is_gambling else MMR_WIN_HONEST
     else:
         delta = MMR_LOSS_GAMBLING if is_gambling else MMR_LOSS_HONEST
-    await db.update_mmr(user_id, delta)
+    new_mmr = await db.update_mmr(user_id, delta, game_type=game_type)
     # Достижения
     stats = await db.get_user_game_stats(user_id)
     if result == "win" and not await db.has_achievement(user_id, "first_win"):
@@ -117,6 +120,18 @@ async def _update_mmr_and_achievements(user_id: int, game_type: str, result: str
         if len(results) >= 10 and all(r == "loss" for r in results):
             await db.unlock_achievement(user_id, "losses_streak_10")
             await db.unlock_achievement(user_id, "risky")
+    # MMR-ивент: случайный бафф на 1 мин (80% шанс, x1.2 множ и т.д.)
+    if result == "win" and chat_id and bot:
+        try:
+            out = await events_service.try_trigger_mmr_lucky_event(user_id, new_mmr, chat_id, bot)
+            if out:
+                text, img_name, path = out
+                if path.exists():
+                    await bot.send_photo(chat_id, FSInputFile(str(path)), caption=text or " ")
+                else:
+                    await bot.send_message(chat_id, text or "🍀 Ветер удачи на 1 минуту!")
+        except Exception as e:
+            logger.debug("MMR lucky event send: %s", e)
 
 
 async def _maybe_send_event_message(user_id: int, chat_id: int, bot: Bot, balance: Optional[int] = None):
@@ -132,6 +147,19 @@ async def _maybe_send_event_message(user_id: int, chat_id: int, bot: Bot, balanc
             await bot.send_message(chat_id, text or "Что-то изменилось. Поиграй — почувствуешь.")
     except Exception as e:
         logger.debug("Event trigger send failed: %s", e)
+
+
+def _apply_bet_penalty(bet: int, mult: float) -> float:
+    """Чем больше ставка — тем меньше эффективный множитель (против фарма на крупных суммах)."""
+    if bet <= 50_000:
+        return mult
+    if bet <= 200_000:
+        return round(mult * 0.9, 2)
+    if bet <= 500_000:
+        return round(mult * 0.8, 2)
+    if bet <= 1_000_000:
+        return round(mult * 0.7, 2)
+    return round(mult * 0.6, 2)
 
 
 async def calculate_win_chance_async(base_chance: float, user_id: int, game_slug: Optional[str] = None) -> float:
@@ -845,9 +873,9 @@ async def cb_risk40_take(callback: CallbackQuery):
     await db.log_admin_game(target_id, username, f"/{slug}", bet, "win", win_amount - bet, tax or 0)
     balance_after = await db.get_balance(target_id)
     await _update_mmr_and_achievements(target_id, slug, "win", balance_after)
-    caption = format_message_with_username(
-        f"🎮 <b>ВЫИГРЫШ!</b>\n\nЗабрал <b>{win_amount}</b> коинов (x{mult:.2f}). Баланс: <b>{balance_after}</b>",
-        username, first_name
+    caption = await format_message_game_result_async(
+        f"вы выиграли. 🎮 Забрал <b>{win_amount}</b> коинов (x{mult:.2f}). Баланс: <b>{balance_after}</b>",
+        target_id
     )
     photo_path = config.get_game_image_path(slug, "win")
     try:
@@ -907,11 +935,9 @@ async def cb_risk40_act(callback: CallbackQuery):
         balance_after = await db.get_balance(target_id)
         await _update_mmr_and_achievements(target_id, slug, "loss", balance_after)
         photo_path = config.get_game_image_path(slug, "lose")
-        user = await db.get_user(target_id)
-        un = user.get("username") if user else None
-        caption = format_message_with_username(
-            f"💥 <b>ОБВАЛ!</b>\n\nПотерял ставку <b>{bet}</b> коинов. Баланс: <b>{balance_after}</b>",
-            un, None
+        caption = await format_message_game_result_async(
+            f"вы проиграли. 💥 Потеряли ставку <b>{bet}</b> коинов. Баланс: <b>{balance_after}</b>",
+            target_id
         )
         try:
             if photo_path.exists():
@@ -1394,14 +1420,14 @@ async def cb_frekaz_cancel(callback: CallbackQuery):
 # ---------- /perekyp (Перекуп: объявления, торг, перепродажа) ----------
 _active_perekyp_sessions: Dict[int, Dict] = {}  # user_id -> {chat_id, message_id, listing, scroll_count, torg_failed}
 
-# Спецпродавцы: редкие, фиксированное описание, покупка у них всегда окуп
+# Спецпродавцы: редкие, фиксированное описание, 70% шанс окупа (не 100%)
 PEREKYP_SPECIAL_DIRECTRISA = {
     "seller": "Жирная Директриса",
     "description": "Биг маки на развес",
     "short_desc": "Самые лучшие биг маки в мире.",
     "rating": 8,
     "reviews": 88,
-    "always_win": True,
+    "special_win_chance": 0.7,
 }
 PEREKYP_SPECIAL_KAZAK = {
     "seller": "Казак",
@@ -1409,7 +1435,7 @@ PEREKYP_SPECIAL_KAZAK = {
     "short_desc": "Клянусь, там нет соплей.",
     "rating": 4,
     "reviews": 88,
-    "always_win": True,
+    "special_win_chance": 0.7,
 }
 PEREKYP_SPECIAL_CHANCE = 0.02  # шанс выпасть каждому редкому продавцу (Жирная Директриса / Казак — редко)
 
@@ -1623,7 +1649,7 @@ def _perekyp_generate_listing(base_sum: int) -> Dict:
             "rating": s["rating"],
             "reviews": s["reviews"],
             "short_desc": s["short_desc"],
-            "always_win": s["always_win"],
+            "special_win_chance": s.get("special_win_chance", 0.7),
         }
     if r < 2 * PEREKYP_SPECIAL_CHANCE:
         s = PEREKYP_SPECIAL_KAZAK
@@ -1634,7 +1660,7 @@ def _perekyp_generate_listing(base_sum: int) -> Dict:
             "rating": s["rating"],
             "reviews": s["reviews"],
             "short_desc": s["short_desc"],
-            "always_win": s["always_win"],
+            "special_win_chance": s.get("special_win_chance", 0.7),
         }
     item = game_random.choice(PEREKYP_ITEMS)
     seller = game_random.choice(PEREKYP_SELLER_NAMES)
@@ -1705,15 +1731,19 @@ async def _perekyp_do_buy(
         except Exception:
             pass
         return
-    base_chance = getattr(config, "PEREKYP_BUY_WIN_CHANCE", 0.45)
+    base_chance = getattr(config, "PEREKYP_BUY_WIN_CHANCE", 0.38)
     rating = (listing or {}).get("rating", 3)
-    always_win = (listing or {}).get("always_win", False)
-    win_chance = min(0.95, base_chance * (0.6 + 0.1 * rating)) if not always_win else 1.0
+    special_chance = (listing or {}).get("special_win_chance")
+    if special_chance is not None:
+        win_chance = special_chance
+    else:
+        win_chance = min(0.85, base_chance * (0.6 + 0.1 * rating))
     won = game_random.random() < win_chance
     if won:
-        mult_min = getattr(config, "PEREKYP_WIN_MULT_MIN", 1.5)
-        mult_max = getattr(config, "PEREKYP_WIN_MULT_MAX", 5.0)
+        mult_min = getattr(config, "PEREKYP_WIN_MULT_MIN", 1.3)
+        mult_max = getattr(config, "PEREKYP_WIN_MULT_MAX", 3.2)
         mult = round(game_random.uniform(mult_min, mult_max), 2)
+        mult = _apply_bet_penalty(price, mult)
         win_amount = int(price * mult)
         _, _, _, tax = await balance_service.add_game_win(
             user_id=user_id, gross_amount=win_amount,
@@ -1723,7 +1753,7 @@ async def _perekyp_do_buy(
         await db.log_game_session(user_id, "perekyp", price, "win", win_amount - price, mult)
         await db.log_admin_game(user_id, username, "/perekyp", price, "win", win_amount - price, tax or 0)
         balance_after = await db.get_balance(user_id)
-        await _update_mmr_and_achievements(user_id, "perekyp", "win", balance_after)
+        await _update_mmr_and_achievements(user_id, "perekyp", "win", balance_after, chat_id=chat_id, bot=bot)
         caption = format_message_with_username(
             f"✅ Дружок, риск был оправдан — перепродал и в плюсе <b>+{win_amount}</b> коинов (x{mult:.2f}). Баланс: <b>{balance_after}</b>",
             username, first_name
@@ -3474,8 +3504,9 @@ async def cmd_random(message: Message):
         await db.log_admin_game(user_id, username, "/random", stake, "win", win_amount - stake, None)
         balance_after = await db.get_balance(user_id)
         await _update_mmr_and_achievements(user_id, "random", "win", balance_after)
+        echo_hint = (_last_echo_analysis.get(user_id, {}).get("signature", "") + "\n\n") if user_id in _last_echo_analysis else ""
         caption = format_message_with_username(
-            f"🎲 <b>{name}</b>\n\n✅ Победил. +<b>{win_amount}</b> коинов. Баланс: <b>{balance_after}</b>",
+            f"🎲 <b>{name}</b>\n\n{echo_hint}✅ Победил. +<b>{win_amount}</b> коинов. Баланс: <b>{balance_after}</b>",
             username, first_name
         )
         photo = config.get_game_image_path(game_id, "win")
@@ -3486,8 +3517,9 @@ async def cmd_random(message: Message):
         await db.log_admin_game(user_id, username, "/random", stake, "loss", -stake, 0)
         balance_after = await db.get_balance(user_id)
         await _update_mmr_and_achievements(user_id, "random", "loss", balance_after)
+        echo_hint = (_last_echo_analysis.get(user_id, {}).get("signature", "") + "\n\n") if user_id in _last_echo_analysis else ""
         caption = format_message_with_username(
-            f"🎲 <b>{name}</b>\n\n❌ Проигрыш. Минус <b>{stake}</b> коинов. Баланс: <b>{balance_after}</b>",
+            f"🎲 <b>{name}</b>\n\n{echo_hint}❌ Проигрыш. Минус <b>{stake}</b> коинов. Баланс: <b>{balance_after}</b>",
             username, first_name
         )
         photo = config.get_game_image_path(game_id, "lose")
@@ -3572,8 +3604,13 @@ async def cmd_gamerandom(message: Message):
     won = win_amount > 0
 
     event_text = "🔧 Баг матрицы дал лишний шанс…\n\n" if bug_event else ""
+    echo_hint = ""
+    if user_id in _last_echo_analysis:
+        sig = _last_echo_analysis[user_id].get("signature", "")
+        if sig:
+            echo_hint = f"📌 {sig}\n\n"
     result_cap = format_message_with_username(
-        f"⚠️ Сбой матрицы. Тип: <b>{game_type}</b>.\n\n{event_text}"
+        f"⚠️ Сбой матрицы. Тип: <b>{game_type}</b>.\n\n{echo_hint}{event_text}"
         + (f"✅ +<b>{win_amount}</b> коинов." if won else f"❌ Минус <b>{stake}</b> коинов."),
         username, first_name
     )
@@ -3823,20 +3860,29 @@ async def cmd_topgame(message: Message):
     asyncio.create_task(delete_message_after(sent, config.MESSAGE_DELETE_TIMEOUT))
 
 
-# ---------- /echo — Эхо решений (СУПЕР-ИМБА: архетипы, анализ, картинки) ----------
+# ---------- /echo — Эхо решений (архетипы, углублённый анализ, подстройка бота) ----------
 _last_echo_archetype: Dict[int, str] = {}  # user_id -> archetype_id для /random и /gamerandom
+_last_echo_analysis: Dict[int, Dict] = {}  # user_id -> полный анализ для подстройки сообщений
 
 ECHO_ARCHETYPES = {
-    "strategist": {"label": "🧠 Стратег", "desc": "Ты просчитываешь ходы. Средние ставки, стабильный результат. Расчёт в плюсе."},
-    "gambling": {"label": "🎰 Азартный", "desc": "Ты часто рискуешь и редко отступаешь. Крупные ставки, ва-банк. Эхо это помнит."},
-    "cautious": {"label": "🐀 Осторожный", "desc": "Маленькие ставки, много побед. Эхо видит тебя надёжным."},
-    "chaotic": {"label": "🧨 Хаотичный", "desc": "Непредсказуемая манера. То осторожно, то ва-банк. Эхо не уверено в тебе."},
-    "overconfident": {"label": "👑 Самоуверенный", "desc": "После серии побед ты заходишь слишком далеко. Эхо предупреждает."},
+    "strategist": {"label": "🧠 Стратег", "desc": "Ты просчитываешь ходы. Средние ставки, стабильный результат. Расчёт в плюсе.", "hint": "Эхо помнит: ты играешь расчётливо."},
+    "gambling": {"label": "🎰 Азартный", "desc": "Ты часто рискуешь и редко отступаешь. Крупные ставки, ва-банк. Эхо это помнит.", "hint": "Эхо помнит: ты идёшь ва-банк."},
+    "cautious": {"label": "🐀 Осторожный", "desc": "Маленькие ставки, много побед. Эхо видит тебя надёжным.", "hint": "Эхо помнит: ты не спешишь рисковать."},
+    "chaotic": {"label": "🧨 Хаотичный", "desc": "Непредсказуемая манера. То осторожно, то ва-банк. Эхо не уверено в тебе.", "hint": "Эхо помнит: твой стиль меняется."},
+    "overconfident": {"label": "👑 Самоуверенный", "desc": "После серии побед ты заходишь слишком далеко. Эхо предупреждает.", "hint": "Эхо помнит: после побед ты задираешь ставки."},
+}
+
+# Человекочитаемые названия игр для подписи (остальные — slug как есть)
+ECHO_GAME_NAMES = {
+    "slot": "слот", "konopla": "конопля", "kripta": "Lucky Jet", "almaz": "алмазы",
+    "rulet": "рулетка", "frekaz": "фреказ", "perekyp": "перекуп", "random": "судьба", "gamerandom": "сбой матрицы",
+    "blackmarket": "чёрный рынок", "echo": "эхо", "fracture": "излом", "mirror": "зеркало",
+    "reactor": "реактор", "vault": "хранилище", "dicepath": "кубик",
 }
 
 
 def _echo_archetype(sessions: list) -> tuple:
-    """По последним 10–20 играм: архетип (id, label, desc), avg_bet, win_rate."""
+    """По последним 10–20 играм: архетип (id, label, desc), avg_bet, win_rate. Возвращает 5 элементов."""
     if not sessions or len(sessions) < 2:
         a = ECHO_ARCHETYPES["chaotic"]
         return "chaotic", a["label"], a["desc"], 0, 0.0
@@ -3861,6 +3907,48 @@ def _echo_archetype(sessions: list) -> tuple:
         return "strategist", a["label"], a["desc"], int(avg_bet), win_rate
     a = ECHO_ARCHETYPES["chaotic"]
     return "chaotic", a["label"], a["desc"], int(avg_bet), win_rate
+
+
+def _echo_player_analysis(sessions: list) -> Dict:
+    """
+    Углублённый анализ игрока по последним играм: архетип, разнообразие, доминирующая игра,
+    риск (0–1), подпись стиля. Используется в /echo и для подстройки текстов бота.
+    """
+    arch_id, label, desc, avg_bet, win_rate = _echo_archetype(sessions)
+    unique_types = list({s.get("game_type") for s in sessions if s.get("game_type")})
+    variety = len(unique_types)
+    from collections import Counter
+    types_counts = Counter(s.get("game_type") for s in sessions if s.get("game_type"))
+    dominant = types_counts.most_common(1)[0][0] if types_counts else None
+    dominant_name = ECHO_GAME_NAMES.get(dominant, dominant) if dominant else None
+    # Риск: высокие ставки и проигрыши = высокий риск
+    bets = [s.get("bet", 0) for s in sessions if s.get("bet", 0) > 0]
+    bet_var = (max(bets) - min(bets)) / max(bets, default=1) if bets else 0
+    risk_score = min(1.0, (avg_bet / 500.0) * 0.5 + (1 - win_rate) * 0.3 + bet_var * 0.2) if sessions else 0.5
+    # Подпись стиля (одна строка)
+    if variety <= 2 and dominant_name:
+        signature = f"Чаще всего: {dominant_name}. Меняй игру — больше прогресс по MMR."
+    elif variety >= 5:
+        signature = f"Разнообразная манера — {variety} разных игр. Эхо это ценит."
+    elif arch_id == "cautious":
+        signature = "Маленькие ставки, стабильный результат. Эхо видит тебя надёжным."
+    elif arch_id == "gambling":
+        signature = "Крупные ставки, ва-банк. Эхо предупреждает: разнообразие даёт больше MMR."
+    else:
+        signature = ECHO_ARCHETYPES.get(arch_id, {}).get("hint", "Эхо следит за твоим стилем.")
+    return {
+        "archetype_id": arch_id,
+        "archetype_label": label,
+        "archetype_desc": desc,
+        "avg_bet": int(avg_bet),
+        "win_rate": win_rate,
+        "variety": variety,
+        "dominant_game": dominant,
+        "dominant_game_name": dominant_name,
+        "risk_score": round(risk_score, 2),
+        "signature": signature,
+        "games_analyzed": len(sessions),
+    }
 
 
 ECHO_FORTUNE_LUCKY = [
@@ -3908,21 +3996,38 @@ async def cmd_echo(message: Message):
     await asyncio.sleep(2)
 
     last_sessions = await db.get_last_game_sessions(user_id, 20)
-    archetype_id, label, desc, avg_bet, win_rate = _echo_archetype(last_sessions)
-    _last_echo_archetype[user_id] = archetype_id
+    analysis = _echo_player_analysis(last_sessions)
+    _last_echo_archetype[user_id] = analysis["archetype_id"]
+    _last_echo_analysis[user_id] = analysis
 
-    # Прогноз: везёт или нет (случай с лёгким уклоном по архетипу)
+    archetype_id = analysis["archetype_id"]
+    label = analysis["archetype_label"]
+    desc = analysis["archetype_desc"]
+    avg_bet = analysis["avg_bet"]
+    win_rate = analysis["win_rate"]
+    variety = analysis["variety"]
+    dominant_name = analysis.get("dominant_game_name")
+    signature = analysis.get("signature", "")
+
+    # Прогноз: везёт или нет (с учётом архетипа и risk_score)
     if archetype_id == "cautious":
         fortune = game_random.choice(ECHO_FORTUNE_LUCKY + ECHO_FORTUNE_LUCKY + ECHO_FORTUNE_UNLUCKY)
     elif archetype_id == "gambling":
         fortune = game_random.choice(ECHO_FORTUNE_UNLUCKY + ECHO_FORTUNE_UNLUCKY + ECHO_FORTUNE_LUCKY)
+    elif analysis.get("risk_score", 0.5) > 0.6:
+        fortune = game_random.choice(ECHO_FORTUNE_UNLUCKY + ECHO_FORTUNE_LUCKY)
     else:
         fortune = game_random.choice(ECHO_FORTUNE_LUCKY + ECHO_FORTUNE_UNLUCKY)
 
+    variety_line = f"🎮 Разнообразие: <b>{variety}</b> разных игр за последние {analysis['games_analyzed']}."
+    if dominant_name:
+        variety_line += f" Чаще всего: <b>{dominant_name}</b>."
     result_cap = format_message_with_username(
         f"🔮 <b>Кто ты</b>\n\n{label}.\n{desc}\n\n"
-        f"📊 По последним играм: средняя ставка ~{avg_bet} коинов, доля побед ~{int(win_rate*100)}%.\n\n"
-        f"📌 {fortune}"
+        f"📊 Средняя ставка ~{avg_bet} коинов, доля побед ~{int(win_rate*100)}%.\n"
+        f"{variety_line}\n\n"
+        f"📌 {signature}\n\n"
+        f"🔮 {fortune}"
         + (f"\n\n✅ За первый запуск сегодня: +50 коинов." if give_reward else "\n\nПовторный запуск сегодня — только описание, без награды."),
         username, first_name
     )
@@ -3996,13 +4101,13 @@ async def _fracture_timeout_task(user_id: int, step_at_start: int):
     next_step = len(new_answers)
     if next_step >= FRACTURE_NUM_STEPS:
         correct = sum(1 for i, idx in enumerate(new_answers) if i < len(questions) and questions[i][2] == idx)
-        win_chance = 0.28 + 0.062 * correct
+        win_chance = 0.22 + 0.05 * correct
         try:
             win_chance = await calculate_win_chance_async(win_chance, user_id, "fracture")
         except Exception:
             pass
-        mult_min, mult_max = 1.2 + correct * 0.1, 1.8 + correct * 0.15
-        mult_min, mult_max = min(2.0, mult_min), min(3.0, mult_max)
+        mult_min, mult_max = 1.15 + correct * 0.08, 1.6 + correct * 0.12
+        mult_min, mult_max = min(1.8, mult_min), min(2.5, mult_max)
         won = game_random.random() < win_chance
         style_comment = f"Правильных: <b>{correct}</b> из {FRACTURE_NUM_STEPS}. Часть — по таймауту."
         if won:
@@ -4013,12 +4118,13 @@ async def _fracture_timeout_task(user_id: int, step_at_start: int):
                 mult = events_service.apply_event_to_multiplier(mult, ev_type, is_win=True)
             except Exception:
                 pass
+            mult = _apply_bet_penalty(bet, mult)
             win_amount = int(bet * mult)
             _, balance_before, balance_after, tax = await balance_service.add_game_win(user_id=user_id, gross_amount=win_amount, command_source="/fracture", comment="Излом (финал по таймауту)", bot=bot, chat_id=chat_id, username=username, first_name=first_name)
             net_added = balance_after - balance_before
             await db.log_game_session(user_id, "fracture", bet, "win", net_added - bet, mult)
             await db.log_admin_game(user_id, username, "/fracture", bet, "win", net_added - bet, tax or 0)
-            await _update_mmr_and_achievements(user_id, "fracture", "win", balance_after)
+            await _update_mmr_and_achievements(user_id, "fracture", "win", balance_after, chat_id=chat_id, bot=bot)
             caption = format_message_with_username(f"🧩 <b>Излом решения</b>\n\n{style_comment}\n\n✅ Зачислено <b>+{net_added}</b> коинов (x{mult:.2f}). Баланс: <b>{balance_after}</b>", username, first_name)
         else:
             await db.log_game_session(user_id, "fracture", bet, "loss", -bet, 0)
@@ -4243,10 +4349,10 @@ async def cb_fracture(callback: CallbackQuery):
 
     _active_fracture_sessions.pop(user_id, None)
     correct = sum(1 for i, idx in enumerate(answers) if questions[i][2] == idx)
-    win_chance = 0.28 + 0.062 * correct
+    win_chance = 0.22 + 0.05 * correct
     win_chance = await calculate_win_chance_async(win_chance, user_id, "fracture")
-    mult_min, mult_max = 1.2 + correct * 0.1, 1.8 + correct * 0.15
-    mult_min, mult_max = min(2.0, mult_min), min(3.0, mult_max)
+    mult_min, mult_max = 1.15 + correct * 0.08, 1.6 + correct * 0.12
+    mult_min, mult_max = min(1.8, mult_min), min(2.5, mult_max)
     won = game_random.random() < win_chance
     style_comment = f"Правильных ответов: <b>{correct}</b> из {FRACTURE_NUM_STEPS}."
     if won:
@@ -4254,6 +4360,7 @@ async def cb_fracture(callback: CallbackQuery):
         ev = await events_service.get_active_event(user_id)
         ev_type = ev.get("event_type") if ev else None
         mult = events_service.apply_event_to_multiplier(mult, ev_type, is_win=True)
+        mult = _apply_bet_penalty(bet, mult)
         win_amount = int(bet * mult)
         _, balance_before, balance_after, tax = await balance_service.add_game_win(
             user_id=user_id, gross_amount=win_amount,
@@ -4263,7 +4370,7 @@ async def cb_fracture(callback: CallbackQuery):
         net_added = balance_after - balance_before
         await db.log_game_session(user_id, "fracture", bet, "win", net_added - bet, mult)
         await db.log_admin_game(user_id, username, "/fracture", bet, "win", net_added - bet, tax or 0)
-        await _update_mmr_and_achievements(user_id, "fracture", "win", balance_after)
+        await _update_mmr_and_achievements(user_id, "fracture", "win", balance_after, chat_id=chat_id, bot=bot)
         caption = format_message_with_username(
             f"🧩 <b>Излом решения</b>\n\n{style_comment}\n\n✅ Зачислено <b>+{net_added}</b> коинов (x{mult:.2f}). Баланс: <b>{balance_after}</b>",
             username, first_name
@@ -4505,9 +4612,9 @@ async def cb_mirror(callback: CallbackQuery):
             await db.log_admin_game(uid, username, "/mirror", stake, "win", win_amount - stake, None)
             balance_after = await db.get_balance(uid)
             await _update_mmr_and_achievements(uid, "mirror", "win", balance_after)
-            caption = format_message_with_username(
-                f"🪞 <b>Зеркало</b>\n\nДилер повержен. Победа.\n\n✅ +<b>{win_amount}</b> коинов (x2). Баланс: <b>{balance_after}</b>",
-                username, first_name
+            caption = await format_message_game_result_async(
+                f"вы выиграли. 🪞 <b>Зеркало</b> — дилер повержен. ✅ +<b>{win_amount}</b> коинов (x2). Баланс: <b>{balance_after}</b>",
+                uid
             )
             photo = config.get_game_image_path("mirror", "win")
         else:
@@ -4515,9 +4622,9 @@ async def cb_mirror(callback: CallbackQuery):
             await db.log_admin_game(uid, username, "/mirror", stake, "loss", -stake, 0)
             balance_after = await db.get_balance(uid)
             await _update_mmr_and_achievements(uid, "mirror", "loss", balance_after)
-            caption = format_message_with_username(
-                f"🪞 <b>Зеркало</b>\n\nТы проиграл. Дилер выиграл.\n\n❌ Минус <b>{stake}</b> коинов. Баланс: <b>{balance_after}</b>",
-                username, first_name
+            caption = await format_message_game_result_async(
+                f"вы проиграли. 🪞 <b>Зеркало</b> — дилер выиграл. ❌ Минус <b>{stake}</b> коинов. Баланс: <b>{balance_after}</b>",
+                uid
             )
             photo = config.get_game_image_path("mirror", "lose")
         try:

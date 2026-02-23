@@ -341,6 +341,11 @@ class Database:
                 await self.execute("ALTER TABLE users ADD COLUMN mmr INTEGER DEFAULT 0 NOT NULL")
             except Exception:
                 pass
+            # Миграция: цена технолог-коина в рублях (0.1–3) для /birzh
+            try:
+                await self.execute("ALTER TABLE birzh_state ADD COLUMN technolog_rub REAL DEFAULT 1.0")
+            except Exception:
+                pass
 
             # Таблица: 1 бесплатная игра в сутки при балансе 0 (дата последнего использования)
             await self.execute("""
@@ -409,6 +414,37 @@ class Database:
                     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
                 )
             """)
+            # Перерождения: user_id, rebirth_count (каждое +0.5x к удаче), стоимость следующего x2
+            await self.execute("""
+                CREATE TABLE IF NOT EXISTS rebirths (
+                    user_id INTEGER PRIMARY KEY,
+                    rebirth_count INTEGER DEFAULT 0 NOT NULL,
+                    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+                )
+            """)
+
+            # /birzh: глобальная цена шарага-коина (1–100), обновляется при действиях
+            await self.execute("""
+                CREATE TABLE IF NOT EXISTS birzh_state (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    price INTEGER DEFAULT 50 NOT NULL,
+                    updated_at INTEGER NOT NULL
+                )
+            """)
+            await self.execute("""
+                CREATE TABLE IF NOT EXISTS user_birzh (
+                    user_id INTEGER PRIMARY KEY,
+                    sharaga_balance INTEGER DEFAULT 0 NOT NULL,
+                    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+                )
+            """)
+            row = await self.fetchone("SELECT 1 FROM birzh_state WHERE id = 1")
+            if not row:
+                await self.execute(
+                    "INSERT INTO birzh_state (id, price, updated_at) VALUES (1, 50, ?)",
+                    (int(datetime.now().timestamp()),)
+                )
+
             # /echo: дата последней выдачи 50 коинов (раз в сутки)
             await self.execute("""
                 CREATE TABLE IF NOT EXISTS echo_reward_dates (
@@ -601,6 +637,7 @@ class Database:
             ("billionaire", "Миллиардер (1 000 000 000)", "💎"),
             ("losses_streak_10", "10 проигрышей подряд", "🔥"),
             ("risky", "Рискованный (10 проигрышей подряд)", "🔥"),
+            ("rebirth_first", "Первое перерождение", "🔄"),
         ]
         for key, title, prefix in definitions:
             await self.execute(
@@ -742,6 +779,14 @@ class Database:
 
     # ==================== МЕТОДЫ ДЛЯ РАБОТЫ С БАЛАНСОМ ====================
     
+    async def set_balance_direct(self, user_id: int, new_balance: int) -> bool:
+        """Прямая установка баланса (для /skinna0, перерождения)."""
+        await self.execute(
+            "UPDATE users SET balance = ? WHERE user_id = ?",
+            (new_balance, user_id)
+        )
+        return True
+
     async def get_balance(self, user_id: int) -> int:
         """
         Получение текущего баланса пользователя
@@ -1414,10 +1459,43 @@ class Database:
         except Exception:
             return 0
 
-    async def update_mmr(self, user_id: int, delta: int) -> int:
-        """Изменить MMR на delta (может быть отрицательным). Новый MMR не ниже 0. Возвращает новый MMR."""
+    MMR_MIN_GAMES_FOR_LEGEND = 60
+    MMR_SAME_GAME_PENALTY_AFTER = 10
+
+    async def get_last_game_types(self, user_id: int, limit: int = 12) -> List[str]:
+        """Последние game_type по games_sessions (для анти-абуза одной игры)."""
+        try:
+            rows = await self.fetchall(
+                "SELECT game_type FROM games_sessions WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
+                (user_id, limit)
+            )
+            return [r[0] for r in (rows or []) if r and r[0]]
+        except Exception:
+            return []
+
+    async def get_total_games_count(self, user_id: int) -> int:
+        """Общее количество сыгранных игр (games_sessions)."""
+        try:
+            row = await self.fetchone("SELECT COUNT(*) FROM games_sessions WHERE user_id = ?", (user_id,))
+            return int(row[0]) if row and row[0] is not None else 0
+        except Exception:
+            return 0
+
+    async def update_mmr(self, user_id: int, delta: int, game_type: Optional[str] = None) -> int:
+        """Изменить MMR на delta. Анти-абуз: если последние 10+ игр одной и той же — снижаем прирост и усиливаем потери. До лиги Легенда — минимум 60 игр."""
         current = await self.get_user_mmr(user_id)
+        if game_type:
+            last_types = await self.get_last_game_types(user_id, limit=12)
+            same_count = sum(1 for t in last_types if t == game_type)
+            if same_count >= self.MMR_SAME_GAME_PENALTY_AFTER:
+                if delta > 0:
+                    delta = max(1, int(delta * 0.25))
+                else:
+                    delta = int(delta * 1.3)
         new_mmr = max(0, current + delta)
+        total_games = await self.get_total_games_count(user_id)
+        if new_mmr >= 2000 and total_games < self.MMR_MIN_GAMES_FOR_LEGEND:
+            new_mmr = min(new_mmr, 1999)
         try:
             await self.execute("UPDATE users SET mmr = ? WHERE user_id = ?", (new_mmr, user_id))
         except Exception:
@@ -1430,6 +1508,107 @@ class Database:
             if low <= mmr <= high:
                 return name
         return self.LEAGUE_RANGES[0][2]
+
+    def get_mmr_to_next_league(self, mmr: int) -> Optional[int]:
+        """MMR до следующей лиги (None если уже Легенда)."""
+        for i, (low, high, _) in enumerate(self.LEAGUE_RANGES):
+            if low <= mmr <= high and i + 1 < len(self.LEAGUE_RANGES):
+                next_low = self.LEAGUE_RANGES[i + 1][0]
+                return max(0, next_low - mmr)
+        return None
+
+    def get_league_info(self, mmr: int) -> Dict[str, Any]:
+        """Полная сводка по лиге для профиля: название, диапазон, прогресс внутри лиги (0–1), MMR до следующей."""
+        for i, (low, high, name) in enumerate(self.LEAGUE_RANGES):
+            if low <= mmr <= high:
+                span = high - low + 1
+                mmr_in = mmr - low
+                progress = mmr_in / span if span else 0
+                to_next = None
+                if i + 1 < len(self.LEAGUE_RANGES):
+                    next_low = self.LEAGUE_RANGES[i + 1][0]
+                    to_next = max(0, next_low - mmr)
+                return {
+                    "name": name,
+                    "low": low,
+                    "high": high,
+                    "mmr_in_league": mmr_in,
+                    "span": span,
+                    "progress": min(1.0, progress),
+                    "to_next_league": to_next,
+                }
+        low, high, name = self.LEAGUE_RANGES[0]
+        return {"name": name, "low": low, "high": high, "mmr_in_league": 0, "span": high - low + 1, "progress": 0.0, "to_next_league": max(0, 100 - mmr)}
+
+    # ==================== БИРЖА /birzh ====================
+
+    BIRZH_PRICE_MIN, BIRZH_PRICE_MAX = 1, 100
+    BIRZH_TICK_SEC = 30
+
+    BIRZH_TECHNOLOG_RUB_MIN, BIRZH_TECHNOLOG_RUB_MAX = 0.1, 3.0
+
+    async def get_birzh_price(self) -> Tuple[int, int, float]:
+        """Текущая цена шарага (1–100), updated_at и цена технолог-коина в рублях (0.1–3). При необходимости обновить (random walk)."""
+        try:
+            row = await self.fetchone("SELECT price, updated_at, technolog_rub FROM birzh_state WHERE id = 1")
+        except Exception:
+            row = await self.fetchone("SELECT price, updated_at FROM birzh_state WHERE id = 1")
+            row = (row[0], row[1], None) if row else None
+        if not row:
+            return 50, 0, 1.0
+        price, updated_at = row[0], row[1]
+        technolog_rub = row[2] if len(row) > 2 and row[2] is not None else round(random.uniform(self.BIRZH_TECHNOLOG_RUB_MIN, self.BIRZH_TECHNOLOG_RUB_MAX), 1)
+        now = int(datetime.now().timestamp())
+        if now - updated_at >= self.BIRZH_TICK_SEC:
+            delta = random.randint(-5, 5)
+            if delta == 0:
+                delta = random.choice([-1, 1])
+            price = max(self.BIRZH_PRICE_MIN, min(self.BIRZH_PRICE_MAX, price + delta))
+            technolog_rub = round(random.uniform(self.BIRZH_TECHNOLOG_RUB_MIN, self.BIRZH_TECHNOLOG_RUB_MAX), 1)
+            try:
+                await self.execute(
+                    "UPDATE birzh_state SET price = ?, updated_at = ?, technolog_rub = ? WHERE id = 1",
+                    (price, now, technolog_rub)
+                )
+            except Exception:
+                await self.execute("UPDATE birzh_state SET price = ?, updated_at = ? WHERE id = 1", (price, now))
+        return price, updated_at, technolog_rub
+
+    async def get_user_sharaga(self, user_id: int) -> int:
+        """Баланс шарага-коинов у пользователя."""
+        row = await self.fetchone("SELECT sharaga_balance FROM user_birzh WHERE user_id = ?", (user_id,))
+        return row[0] if row else 0
+
+    async def birzh_buy_100(self, user_id: int, price_koins: int) -> bool:
+        """Купить 100 шарага за price_koins. Возвращает True если успех."""
+        balance = await self.get_balance(user_id)
+        if balance < price_koins:
+            return False
+        await self.execute(
+            "UPDATE users SET balance = balance - ? WHERE user_id = ?",
+            (price_koins, user_id)
+        )
+        await self.execute(
+            """INSERT INTO user_birzh (user_id, sharaga_balance) VALUES (?, 100)
+               ON CONFLICT(user_id) DO UPDATE SET sharaga_balance = sharaga_balance + 100""",
+            (user_id,)
+        )
+        return True
+
+    async def birzh_sell_100(self, user_id: int, price_koins: int) -> bool:
+        """Продать 100 шарага за price_koins. Возвращает True если успех."""
+        sharaga = await self.get_user_sharaga(user_id)
+        if sharaga < 100:
+            return False
+        await self.execute(
+            "UPDATE user_birzh SET sharaga_balance = sharaga_balance - 100 WHERE user_id = ?",
+            (user_id,)
+        )
+        await self.execute(
+            "UPDATE users SET balance = balance + ? WHERE user_id = ?",
+            (price_koins, user_id)
+        )
+        return True
 
     # ==================== БЕСПЛАТНАЯ ИГРА ПРИ БАЛАНСЕ 0 ====================
 
@@ -1528,6 +1707,41 @@ class Database:
             "UPDATE tax_states SET tax_due = 0, is_paid = 1 WHERE user_id = ?",
             (user_id,)
         )
+
+    # ==================== ПЕРЕРОЖДЕНИЯ ====================
+
+    REBIRTH_BASE_COST = 1_000_000
+
+    async def get_rebirth_count(self, user_id: int) -> int:
+        """Количество перерождений пользователя."""
+        row = await self.fetchone("SELECT rebirth_count FROM rebirths WHERE user_id = ?", (user_id,))
+        return row[0] if row else 0
+
+    async def get_rebirth_cost(self, user_id: int) -> int:
+        """Стоимость следующего перерождения: 1M * 2^count."""
+        count = await self.get_rebirth_count(user_id)
+        return self.REBIRTH_BASE_COST * (2 ** count)
+
+    async def do_rebirth(self, user_id: int) -> Tuple[bool, int, str]:
+        """
+        Выполнить перерождение. Требует balance >= cost. Обнуляет баланс, +1 к rebirth_count.
+        Returns: (успех, новый rebirth_count, сообщение об ошибке)
+        """
+        balance = await self.get_balance(user_id)
+        cost = await self.get_rebirth_cost(user_id)
+        if balance < cost:
+            return False, 0, f"Нужно минимум <b>{cost:,}</b> коинов. У тебя: <b>{balance:,}</b>."
+        await self.set_balance_direct(user_id, 0)
+        count = await self.get_rebirth_count(user_id)
+        new_count = count + 1
+        if count == 0:
+            await self.execute("INSERT INTO rebirths (user_id, rebirth_count) VALUES (?, 1)", (user_id,))
+        else:
+            await self.execute(
+                "UPDATE rebirths SET rebirth_count = rebirth_count + 1 WHERE user_id = ?",
+                (user_id,)
+            )
+        return True, new_count, ""
 
     # ==================== ИГРОВЫЕ НОВОСТИ ====================
 
