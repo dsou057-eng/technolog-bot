@@ -1,5 +1,7 @@
-aiogram
-python-dotenv
-pydantic
-pydantic-settings
-aiosqlite
+# DEBUG + DEPENDENCY FIX: все внешние зависимости, сверено с импортами по проекту
+aiogram>=3.13,<4
+python-dotenv>=1.0.1
+pydantic>=2.9.2
+pydantic-settings>=2.0.0
+aiosqlite>=0.20.0
+aiohttp-socks>=0.8.0
