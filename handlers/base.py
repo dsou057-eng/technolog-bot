@@ -7,8 +7,8 @@ import logging
 from datetime import datetime
 
 from aiogram import Router
-from aiogram.types import Message, FSInputFile
-from aiogram.filters import Command
+from aiogram.types import Message, FSInputFile, CallbackQuery
+from aiogram.filters import Command, F
 
 from config import config
 from db import db
@@ -23,23 +23,94 @@ logger = logging.getLogger(__name__)
 @router.message(Command("start"))
 async def cmd_start(message: Message):
     """
-    /start — приветствие и краткая навигация к /help
+    /start — приветствие и краткая навигация. Бот подстраивается под тип игрока (новичок/про).
     """
     user_id = message.from_user.id
     username = message.from_user.username
     first_name = message.from_user.first_name
 
-    help_text = format_message_with_username(
+    base_text = (
         "👋 Привет! Я Tehnolog Games — бот с играми на коины, экономикой и профилем.\n\n"
         "• <b>/help</b> — полный список команд и разделов (игры, экономика, профиль).\n"
         "• <b>/balance</b> — твой баланс и уровень.\n"
         "• <b>/helpgame название</b> — подробные правила любой игры (например: /helpgame slot или /helpgame fracture).\n\n"
-        "Начни с /help — там всё по полочкам.",
-        username, first_name
     )
-    sent_message = await message.answer(help_text)
+    try:
+        user = await db.get_user(user_id)
+        if not user:
+            await db.create_user(user_id, username)
+        tier = await db.get_user_tier(user_id)
+        if tier == "newcomer":
+            base_text += "🆕 Ты новичок — загляни в <b>/tutorial</b>, там покажем достижения, биржу, лиги и квесты.\n\nНачни с /help — там всё по полочкам."
+        elif tier == "pro":
+            base_text += "🔥 Ты уже в деле — не забудь <b>/bp</b> (боевой пропуск), <b>/season</b> и <b>/cup</b> за наградами.\n\nНачни с /help — там всё по полочкам."
+        else:
+            base_text += "Начни с /help — там всё по полочкам."
+    except Exception:
+        base_text += "Начни с /help — там всё по полочкам."
+
+    help_text = format_message_with_username(base_text, username, first_name)
+    keyboard = None
+    try:
+        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📖 Обучение — где что искать", callback_data="tutorial_main")],
+        ])
+    except Exception:
+        pass
+    sent_message = await message.answer(help_text, reply_markup=keyboard)
     asyncio.create_task(delete_message_after(sent_message, config.MESSAGE_DELETE_TIMEOUT))
     logger.info(f"Пользователь {user_id} использовал /start")
+
+
+@router.message(Command("tutorial"))
+async def cmd_tutorial(message: Message):
+    """Обучение для новичков: достижения, статусы, биржа, лиги, мини-игры."""
+    username = message.from_user.username or ""
+    first_name = message.from_user.first_name or ""
+    text = format_message_with_username(
+        "📖 <b>Обучение</b> — что есть в боте кроме игр:\n\n"
+        "🏅 <b>Достижения</b> — открой в профиле (/profile). Первая победа, 100 игр, миллионер, все 40 risk-игр, биржа +10% за день и др. Дают бейджи.\n\n"
+        "🏷️ <b>Статусы</b> — /statusmarket. Покупай «Богач», «Пубертат страны» и др. — отображаются в профиле.\n\n"
+        "📈 <b>Биржа</b> — /birzh. Шарага, Mr.Kris, ЖД, MR.lisayaderektrisa. Есть дневные задания с наградой коинами.\n\n"
+        "📊 <b>Лиги и сезоны</b> — /profile и /season. MMR растёт за победы. Топ лиги получают награды. Кубки по играм — /cup slot, /cup fracture.\n\n"
+        "🎫 <b>Боевой пропуск</b> — /bp. Квесты дают XP и уровни; с Premium — доп. награды (как Brawl Pass).\n\n"
+        "🎲 <b>Мини-игры</b> — /minigames. Орёл/решка (/coin), угадай число (/guess), кость (/dice) и ещё 7 штук. Быстрый раунд 10–500 коинов.\n\n"
+        "💬 <b>Обращение</b> — в профиле кнопка «Изменить обращение»: как бот тебя зовёт (дружок, царь батюшка и т.д.).",
+        username, first_name
+    )
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Профиль и достижения", callback_data="tutorial_profile"), InlineKeyboardButton(text="Биржа и задания", callback_data="tutorial_birzh")],
+        [InlineKeyboardButton(text="Лиги и кубки", callback_data="tutorial_season"), InlineKeyboardButton(text="Мини-игры", callback_data="tutorial_minigames")],
+    ])
+    sent = await message.answer(text, reply_markup=keyboard)
+    asyncio.create_task(delete_message_after(sent, config.MESSAGE_DELETE_TIMEOUT))
+
+
+@router.callback_query(F.data.startswith("tutorial_"))
+async def cb_tutorial(callback: CallbackQuery):
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    part = callback.data.replace("tutorial_", "")
+    username = callback.from_user.username or ""
+    first_name = callback.from_user.first_name or ""
+    if part == "main":
+        text = "📖 Нажми /tutorial в чате — там полный обзор: достижения, статусы, биржа, лиги, мини-игры."
+    elif part == "profile":
+        text = "👤 /profile — баланс, лига, MMR, достижения. Кнопка «Изменить обращение». /statusmarket — магазин статусов."
+    elif part == "birzh":
+        text = "📈 /birzh — курсы и покупка/продажа. Задание на день: например «Купи 100 ЖД» — награда коинами."
+    elif part == "season":
+        text = "📊 /season — текущий сезон и топ. /cup slot и /cup fracture — кубки по победам за сезон."
+    elif part == "minigames":
+        text = "🎲 /minigames — список. /coin 50, /guess 100 — быстрые раунды с фиксированным множителем."
+    else:
+        text = "📖 /tutorial — полное обучение."
+    await callback.answer()
+    try:
+        await callback.message.edit_text(format_message_with_username(text, username, first_name))
+    except Exception:
+        pass
 
 
 @router.message(Command("help"))
@@ -52,10 +123,10 @@ async def cmd_help(message: Message):
     first_name = message.from_user.first_name
 
     help_text = format_message_with_username(
-        "🎮 <b>Tehnolog Games</b> v1.1 — игры на коины, экономика, профиль с лигой и достижениями\n\n",
+        "🎮 <b>Tehnolog Games</b> v1.2 — игры на коины, экономика, биржа, профиль с лигой\n\n",
         username, first_name
     )
-    help_text += "📌 <b>v1.1</b> — перерождение /pererozhd, баланс экономики (крупные ставки — меньше выигрыш), антижульничество /skinna0\n\n"
+    help_text += "📌 <b>v1.2</b> — биржа: Шарага, Mr.Kris, ЖД, MR.lisayaderektrisa. Исправлен излом решения. /obnova — список изменений.\n\n"
     help_text += "📋 <b>БАЗОВЫЕ КОМАНДЫ</b>\n"
     help_text += "/help — этот список | /balance — баланс и уровень | /top — топ по балансу\n"
     help_text += "/news — игровые новости (влияют на игры; смотри перед ставкой)\n"
@@ -73,7 +144,7 @@ async def cmd_help(message: Message):
     help_text += "/rulet сумма — русская рулетка (2–8 игроков, выбывание по одному, последний забирает банк)\n"
     help_text += "/frekaz сумма — фреказ (до 5 игроков, через 2 мин победитель по весу ставок)\n"
     help_text += "/perekyp сумма — перекуп: объявления с техникой, рейтинг продавца, торг, перепродажа\n"
-    help_text += "/birzh — биржа: шарага-коин (1–100) и технолог-коин в ₽ (0,1–3), купить/продать по 100\n\n"
+    help_text += "/birzh — биржа: Шарага, Mr.Kris, ЖД, MR.lisayaderektrisa (купить/продать по 100), Технолог-коин в ₽\n\n"
     help_text += "🔄 <b>ИГРЫ: РИСК / ЗАБРАТЬ</b> (40 штук)\n"
     help_text += "/reactor, /vault, /dicepath, /overheat, /mindlock, /bombline, /liftx, /doza, /shum, /signal и ещё 31 игра.\n"
     help_text += "Одна механика: множитель растёт, кнопки «Ещё» и «Забрать». Подробнее: /helpgame reactor\n\n"

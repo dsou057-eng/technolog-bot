@@ -341,11 +341,21 @@ class Database:
                 await self.execute("ALTER TABLE users ADD COLUMN mmr INTEGER DEFAULT 0 NOT NULL")
             except Exception:
                 pass
-            # Миграция: цена технолог-коина в рублях (0.1–3) для /birzh
+            # Миграция: цена технолог-коина в рублях для /birzh
             try:
                 await self.execute("ALTER TABLE birzh_state ADD COLUMN technolog_rub REAL DEFAULT 1.0")
             except Exception:
                 pass
+            for col, default in [("kris_price", "1250"), ("jd_price", "7500"), ("lisaya_price", "60000")]:
+                try:
+                    await self.execute(f"ALTER TABLE birzh_state ADD COLUMN {col} INTEGER DEFAULT {default}")
+                except Exception:
+                    pass
+            for col in ["kris_balance", "jd_balance", "lisaya_balance"]:
+                try:
+                    await self.execute(f"ALTER TABLE user_birzh ADD COLUMN {col} INTEGER DEFAULT 0")
+                except Exception:
+                    pass
 
             # Таблица: 1 бесплатная игра в сутки при балансе 0 (дата последнего использования)
             await self.execute("""
@@ -376,6 +386,138 @@ class Database:
             """)
             # Заполняем справочник достижений при первом запуске
             await self._init_achievements()
+
+            # Сезоны лиг: id, название, начало, конец
+            await self.execute("""
+                CREATE TABLE IF NOT EXISTS seasons (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    started_at INTEGER NOT NULL,
+                    ends_at INTEGER NOT NULL
+                )
+            """)
+            row = await self.fetchone("SELECT 1 FROM seasons LIMIT 1")
+            if not row:
+                now = int(datetime.now().timestamp())
+                end = now + 90 * 86400
+                await self.execute("INSERT INTO seasons (name, started_at, ends_at) VALUES (?, ?, ?)", ("Сезон 1", now, end))
+
+            # Кубки по играм: за сезон считаем победы (слот, излом и т.д.)
+            await self.execute("""
+                CREATE TABLE IF NOT EXISTS cup_wins (
+                    season_id INTEGER NOT NULL,
+                    game_slug TEXT NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    wins INTEGER DEFAULT 0 NOT NULL,
+                    PRIMARY KEY (season_id, game_slug, user_id),
+                    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+                )
+            """)
+
+            # Дневные задания биржи: дата, тип (buy_jd_100, sell_kris_100...), выполнен, награда получена
+            await self.execute("""
+                CREATE TABLE IF NOT EXISTS birzh_daily_quests (
+                    user_id INTEGER NOT NULL,
+                    quest_date TEXT NOT NULL,
+                    quest_type TEXT NOT NULL,
+                    completed INTEGER DEFAULT 0 NOT NULL,
+                    reward_claimed INTEGER DEFAULT 0 NOT NULL,
+                    PRIMARY KEY (user_id, quest_date, quest_type),
+                    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+                )
+            """)
+
+            # Снимок портфеля биржи на начало дня (для достижения «+10% за день»)
+            await self.execute("""
+                CREATE TABLE IF NOT EXISTS birzh_daily_snapshot (
+                    user_id INTEGER NOT NULL,
+                    snapshot_date TEXT NOT NULL,
+                    morning_value REAL NOT NULL,
+                    PRIMARY KEY (user_id, snapshot_date),
+                    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+                )
+            """)
+
+            # Глобальные события (день слота, день биржи): тип, окончание (timestamp)
+            await self.execute("""
+                CREATE TABLE IF NOT EXISTS global_events (
+                    event_type TEXT PRIMARY KEY,
+                    ends_at INTEGER NOT NULL
+                )
+            """)
+
+            # Боевой пропуск от технолога (как Brawl Pass)
+            await self.execute("""
+                CREATE TABLE IF NOT EXISTS bp_seasons (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    started_at INTEGER NOT NULL,
+                    ends_at INTEGER NOT NULL
+                )
+            """)
+            await self.execute("""
+                CREATE TABLE IF NOT EXISTS bp_levels (
+                    season_id INTEGER NOT NULL,
+                    level INTEGER NOT NULL,
+                    xp_required INTEGER NOT NULL,
+                    reward_free_type TEXT NOT NULL,
+                    reward_free_value INTEGER NOT NULL,
+                    reward_premium_type TEXT NOT NULL,
+                    reward_premium_value INTEGER NOT NULL,
+                    PRIMARY KEY (season_id, level),
+                    FOREIGN KEY (season_id) REFERENCES bp_seasons(id) ON DELETE CASCADE
+                )
+            """)
+            await self.execute("""
+                CREATE TABLE IF NOT EXISTS bp_quests (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    season_id INTEGER NOT NULL,
+                    quest_key TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    xp_reward INTEGER NOT NULL,
+                    quest_type TEXT NOT NULL,
+                    target_value INTEGER NOT NULL,
+                    UNIQUE(season_id, quest_key),
+                    FOREIGN KEY (season_id) REFERENCES bp_seasons(id) ON DELETE CASCADE
+                )
+            """)
+            await self.execute("""
+                CREATE TABLE IF NOT EXISTS user_bp_progress (
+                    user_id INTEGER NOT NULL,
+                    season_id INTEGER NOT NULL,
+                    level INTEGER DEFAULT 1 NOT NULL,
+                    xp INTEGER DEFAULT 0 NOT NULL,
+                    PRIMARY KEY (user_id, season_id),
+                    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+                )
+            """)
+            await self.execute("""
+                CREATE TABLE IF NOT EXISTS user_bp_claimed (
+                    user_id INTEGER NOT NULL,
+                    season_id INTEGER NOT NULL,
+                    level INTEGER NOT NULL,
+                    is_premium INTEGER NOT NULL,
+                    PRIMARY KEY (user_id, season_id, level, is_premium),
+                    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+                )
+            """)
+            await self.execute("""
+                CREATE TABLE IF NOT EXISTS user_bp_quest_progress (
+                    user_id INTEGER NOT NULL,
+                    season_id INTEGER NOT NULL,
+                    quest_key TEXT NOT NULL,
+                    progress INTEGER DEFAULT 0 NOT NULL,
+                    reset_date TEXT,
+                    PRIMARY KEY (user_id, season_id, quest_key),
+                    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+                )
+            """)
+            row_bp = await self.fetchone("SELECT 1 FROM bp_seasons LIMIT 1")
+            if not row_bp:
+                now = int(datetime.now().timestamp())
+                end_bp = now + 90 * 86400
+                await self.execute("INSERT INTO bp_seasons (name, started_at, ends_at) VALUES (?, ?, ?)", ("Боевой пропуск 1", now, end_bp))
+                await self._init_bp_levels_and_quests()
 
             # Логи для админа: игры (user_id, username, command, bet, result, balance_change, tax, created_at)
             await self.execute("""
@@ -638,6 +780,8 @@ class Database:
             ("losses_streak_10", "10 проигрышей подряд", "🔥"),
             ("risky", "Рискованный (10 проигрышей подряд)", "🔥"),
             ("rebirth_first", "Первое перерождение", "🔄"),
+            ("all_40_risk", "Все 40 risk-игр", "🎮"),
+            ("birzh_10pct_day", "Биржа +10% за день", "📈"),
         ]
         for key, title, prefix in definitions:
             await self.execute(
@@ -1544,70 +1688,105 @@ class Database:
 
     BIRZH_PRICE_MIN, BIRZH_PRICE_MAX = 1, 100
     BIRZH_TICK_SEC = 30
-
     BIRZH_TECHNOLOG_RUB_MIN, BIRZH_TECHNOLOG_RUB_MAX = 0.1, 3.0
+    BIRZH_COINS = {
+        "sharaga": (1, 100, "sharaga_balance"),
+        "kris": (500, 2000, "kris_balance"),
+        "jd": (5000, 10000, "jd_balance"),
+        "lisaya": (20000, 100000, "lisaya_balance"),
+    }
 
     async def get_birzh_price(self) -> Tuple[int, int, float]:
-        """Текущая цена шарага (1–100), updated_at и цена технолог-коина в рублях (0.1–3). При необходимости обновить (random walk)."""
+        """Текущая цена шарага, updated_at, технолог-коин ₽. Обратная совместимость."""
+        data = await self.get_birzh_all_prices()
+        return data["sharaga"], data["updated_at"], data["technolog_rub"]
+
+    async def get_birzh_all_prices(self) -> Dict[str, Any]:
+        """Все курсы биржи: sharaga, kris, jd, lisaya (коины за 100), technolog_rub (₽). Обновляет при тике."""
         try:
-            row = await self.fetchone("SELECT price, updated_at, technolog_rub FROM birzh_state WHERE id = 1")
+            row = await self.fetchone(
+                "SELECT price, updated_at, technolog_rub, kris_price, jd_price, lisaya_price FROM birzh_state WHERE id = 1"
+            )
         except Exception:
             row = await self.fetchone("SELECT price, updated_at FROM birzh_state WHERE id = 1")
-            row = (row[0], row[1], None) if row else None
+            row = (row[0], row[1], 1.0, 1250, 7500, 60000) if row else None
         if not row:
-            return 50, 0, 1.0
+            return {"sharaga": 50, "kris": 1250, "jd": 7500, "lisaya": 60000, "technolog_rub": 1.0, "updated_at": 0}
         price, updated_at = row[0], row[1]
-        technolog_rub = row[2] if len(row) > 2 and row[2] is not None else round(random.uniform(self.BIRZH_TECHNOLOG_RUB_MIN, self.BIRZH_TECHNOLOG_RUB_MAX), 1)
+        technolog_rub = row[2] if len(row) > 2 and row[2] is not None else 1.0
+        kris = row[3] if len(row) > 3 and row[3] is not None else 1250
+        jd = row[4] if len(row) > 4 and row[4] is not None else 7500
+        lisaya = row[5] if len(row) > 5 and row[5] is not None else 60000
         now = int(datetime.now().timestamp())
         if now - updated_at >= self.BIRZH_TICK_SEC:
             delta = random.randint(-5, 5)
             if delta == 0:
                 delta = random.choice([-1, 1])
+            birzh_day = await self.get_global_event("birzh_day")
+            if birzh_day:
+                delta = max(-2, min(2, delta))
             price = max(self.BIRZH_PRICE_MIN, min(self.BIRZH_PRICE_MAX, price + delta))
             technolog_rub = round(random.uniform(self.BIRZH_TECHNOLOG_RUB_MIN, self.BIRZH_TECHNOLOG_RUB_MAX), 1)
+            low, high = self.BIRZH_COINS["kris"][0], self.BIRZH_COINS["kris"][1]
+            kris = max(low, min(high, kris + random.randint(-50, 50)))
+            low, high = self.BIRZH_COINS["jd"][0], self.BIRZH_COINS["jd"][1]
+            jd = max(low, min(high, jd + random.randint(-200, 200)))
+            low, high = self.BIRZH_COINS["lisaya"][0], self.BIRZH_COINS["lisaya"][1]
+            lisaya = max(low, min(high, lisaya + random.randint(-1000, 1000)))
             try:
                 await self.execute(
-                    "UPDATE birzh_state SET price = ?, updated_at = ?, technolog_rub = ? WHERE id = 1",
-                    (price, now, technolog_rub)
+                    """UPDATE birzh_state SET price = ?, updated_at = ?, technolog_rub = ?, kris_price = ?, jd_price = ?, lisaya_price = ? WHERE id = 1""",
+                    (price, now, technolog_rub, kris, jd, lisaya)
                 )
             except Exception:
                 await self.execute("UPDATE birzh_state SET price = ?, updated_at = ? WHERE id = 1", (price, now))
-        return price, updated_at, technolog_rub
+        return {"sharaga": price, "kris": kris, "jd": jd, "lisaya": lisaya, "technolog_rub": technolog_rub, "updated_at": updated_at}
 
     async def get_user_sharaga(self, user_id: int) -> int:
         """Баланс шарага-коинов у пользователя."""
         row = await self.fetchone("SELECT sharaga_balance FROM user_birzh WHERE user_id = ?", (user_id,))
         return row[0] if row else 0
 
-    async def birzh_buy_100(self, user_id: int, price_koins: int) -> bool:
-        """Купить 100 шарага за price_koins. Возвращает True если успех."""
+    async def get_user_birzh_all(self, user_id: int) -> Dict[str, int]:
+        """Все балансы биржевых коинов: sharaga, kris, jd, lisaya."""
+        try:
+            row = await self.fetchone(
+                "SELECT sharaga_balance, COALESCE(kris_balance,0), COALESCE(jd_balance,0), COALESCE(lisaya_balance,0) FROM user_birzh WHERE user_id = ?",
+                (user_id,)
+            )
+        except Exception:
+            row = await self.fetchone("SELECT sharaga_balance FROM user_birzh WHERE user_id = ?", (user_id,))
+            return {"sharaga": row[0] if row else 0, "kris": 0, "jd": 0, "lisaya": 0}
+        if not row:
+            return {"sharaga": 0, "kris": 0, "jd": 0, "lisaya": 0}
+        return {"sharaga": row[0], "kris": row[1] if len(row) > 1 else 0, "jd": row[2] if len(row) > 2 else 0, "lisaya": row[3] if len(row) > 3 else 0}
+
+    async def birzh_buy_100(self, user_id: int, price_koins: int, coin_type: str = "sharaga") -> bool:
+        """Купить 100 единиц коина за price_koins. coin_type: sharaga, kris, jd, lisaya."""
         balance = await self.get_balance(user_id)
         if balance < price_koins:
             return False
+        await self.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (price_koins, user_id))
+        col = self.BIRZH_COINS.get(coin_type, (0, 0, "sharaga_balance"))[2]
         await self.execute(
-            "UPDATE users SET balance = balance - ? WHERE user_id = ?",
-            (price_koins, user_id)
+            """INSERT INTO user_birzh (user_id, sharaga_balance) VALUES (?, 0)
+               ON CONFLICT(user_id) DO NOTHING""",
+            (user_id,)
         )
         await self.execute(
-            """INSERT INTO user_birzh (user_id, sharaga_balance) VALUES (?, 100)
-               ON CONFLICT(user_id) DO UPDATE SET sharaga_balance = sharaga_balance + 100""",
+            f"UPDATE user_birzh SET {col} = COALESCE({col}, 0) + 100 WHERE user_id = ?",
             (user_id,)
         )
         return True
 
-    async def birzh_sell_100(self, user_id: int, price_koins: int) -> bool:
-        """Продать 100 шарага за price_koins. Возвращает True если успех."""
-        sharaga = await self.get_user_sharaga(user_id)
-        if sharaga < 100:
+    async def birzh_sell_100(self, user_id: int, price_koins: int, coin_type: str = "sharaga") -> bool:
+        """Продать 100 единиц коина за price_koins."""
+        balances = await self.get_user_birzh_all(user_id)
+        if balances.get(coin_type, 0) < 100:
             return False
-        await self.execute(
-            "UPDATE user_birzh SET sharaga_balance = sharaga_balance - 100 WHERE user_id = ?",
-            (user_id,)
-        )
-        await self.execute(
-            "UPDATE users SET balance = balance + ? WHERE user_id = ?",
-            (price_koins, user_id)
-        )
+        col = self.BIRZH_COINS.get(coin_type, (0, 0, "sharaga_balance"))[2]
+        await self.execute(f"UPDATE user_birzh SET {col} = COALESCE({col}, 0) - 100 WHERE user_id = ?", (user_id,))
+        await self.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (price_koins, user_id))
         return True
 
     # ==================== БЕСПЛАТНАЯ ИГРА ПРИ БАЛАНСЕ 0 ====================
@@ -1666,6 +1845,418 @@ class Database:
             (user_id, achievement_key, now)
         )
         return True
+
+    # ==================== СЕЗОНЫ И КУБКИ ====================
+
+    async def get_current_season(self) -> Optional[Dict[str, Any]]:
+        """Текущий сезон (где ends_at > now)."""
+        now = int(datetime.now().timestamp())
+        row = await self.fetchone(
+            "SELECT id, name, started_at, ends_at FROM seasons WHERE ends_at > ? ORDER BY ends_at ASC LIMIT 1",
+            (now,)
+        )
+        if not row:
+            return None
+        return {"id": row[0], "name": row[1], "started_at": row[2], "ends_at": row[3]}
+
+    async def end_current_season_and_start_new(self) -> Optional[Dict[str, Any]]:
+        """Завершить текущий сезон (сброс MMR), создать новый. Возвращает новый сезон."""
+        now = int(datetime.now().timestamp())
+        cur = await self.get_current_season()
+        if not cur:
+            return None
+        await self.execute("UPDATE users SET mmr = 0")
+        new_end = now + 90 * 86400
+        await self.execute(
+            "INSERT INTO seasons (name, started_at, ends_at) VALUES (?, ?, ?)",
+            (f"Сезон {(cur['id'] or 0) + 1}", now, new_end)
+        )
+        row = await self.fetchone("SELECT id, name, started_at, ends_at FROM seasons ORDER BY id DESC LIMIT 1")
+        return {"id": row[0], "name": row[1], "started_at": row[2], "ends_at": row[3]} if row else None
+
+    async def cap_all_balances(self, max_balance: int) -> int:
+        """Вайп: обрезать все балансы выше max_balance. Возвращает кол-во затронутых пользователей."""
+        if max_balance < 0:
+            return 0
+        cur = await self.execute("UPDATE users SET balance = ? WHERE balance > ?", (max_balance, max_balance))
+        return cur.rowcount if cur and hasattr(cur, "rowcount") else 0
+
+    async def get_top_by_mmr(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """Топ игроков по MMR (для наград за сезон)."""
+        rows = await self.fetchall(
+            """SELECT u.user_id, u.username, u.mmr FROM users u
+               WHERE u.is_banned = 0 AND u.mmr > 0 ORDER BY u.mmr DESC LIMIT ?""",
+            (limit,)
+        )
+        return [{"user_id": r[0], "username": r[1] or "", "mmr": r[2]} for r in (rows or [])]
+
+    async def add_cup_win(self, user_id: int, game_slug: str) -> None:
+        """Учесть победу в кубке по игре за текущий сезон."""
+        season = await self.get_current_season()
+        if not season:
+            return
+        row = await self.fetchone(
+            "SELECT wins FROM cup_wins WHERE season_id = ? AND game_slug = ? AND user_id = ?",
+            (season["id"], game_slug, user_id)
+        )
+        if row:
+            await self.execute(
+                "UPDATE cup_wins SET wins = wins + 1 WHERE season_id = ? AND game_slug = ? AND user_id = ?",
+                (season["id"], game_slug, user_id)
+            )
+        else:
+            await self.execute(
+                "INSERT INTO cup_wins (season_id, game_slug, user_id, wins) VALUES (?, ?, ?, 1)",
+                (season["id"], game_slug, user_id)
+            )
+
+    async def get_cup_leaderboard(self, game_slug: str, limit: int = 10) -> List[Dict[str, Any]]:
+        """Лидерборд кубка по игре за текущий сезон."""
+        season = await self.get_current_season()
+        if not season:
+            return []
+        rows = await self.fetchall(
+            """SELECT cw.user_id, u.username, cw.wins FROM cup_wins cw
+               JOIN users u ON u.user_id = cw.user_id
+               WHERE cw.season_id = ? AND cw.game_slug = ? AND u.is_banned = 0
+               ORDER BY cw.wins DESC LIMIT ?""",
+            (season["id"], game_slug, limit)
+        )
+        return [{"user_id": r[0], "username": r[1] or str(r[0]), "wins": r[2]} for r in (rows or [])]
+
+    # ==================== ТИП ИГРОКА (НОВИЧОК / ПРО) ====================
+
+    async def get_user_tier(self, user_id: int) -> str:
+        """Тип игрока: newcomer (< 30 игр и низкий lvl), regular, pro (много игр, высокий MMR/уровень)."""
+        total = await self.get_total_games_count(user_id)
+        mmr = await self.get_user_mmr(user_id)
+        user = await self.get_user(user_id)
+        level = (user or {}).get("level", 1) or 1
+        if total < 30 and level < 5:
+            return "newcomer"
+        if total >= 200 or mmr >= 1500 or level >= 25:
+            return "pro"
+        return "regular"
+
+    # ==================== БОЕВОЙ ПРОПУСК ====================
+
+    async def _init_bp_levels_and_quests(self) -> None:
+        """Заполнить уровни и квесты для первого сезона БП."""
+        row = await self.fetchone("SELECT id FROM bp_seasons ORDER BY id DESC LIMIT 1")
+        if not row:
+            return
+        sid = row[0]
+        for lvl in range(1, 51):
+            xp_need = 100 + lvl * 30
+            free_coins = 50 + lvl * 10
+            prem_coins = 100 + lvl * 25
+            await self.execute(
+                """INSERT OR REPLACE INTO bp_levels (season_id, level, xp_required, reward_free_type, reward_free_value, reward_premium_type, reward_premium_value)
+                   VALUES (?, ?, ?, 'coins', ?, 'coins', ?)""",
+                (sid, lvl, xp_need, free_coins, prem_coins)
+            )
+        quests = [
+            ("play_5", "Сыграть 5 игр", 50, "daily", 5),
+            ("win_3", "Победить в 3 играх", 80, "daily", 3),
+            ("earn_500", "Заработать 500 коинов за сессию", 100, "daily", 500),
+            ("fracture_1", "Пройди 1 излом", 60, "daily", 1),
+            ("slot_1", "Сыграть в слот 1 раз", 40, "daily", 1),
+            ("birzh_1", "Сделать сделку на бирже 1 раз", 40, "daily", 1),
+            ("minigame_3", "Сыграть 3 мини-игры", 55, "daily", 3),
+            ("play_20", "Сыграть 20 игр", 200, "weekly", 20),
+            ("win_10", "Победить в 10 играх", 300, "weekly", 10),
+            ("earn_2000", "Заработать 2000 коинов", 250, "weekly", 2000),
+            ("risk_5", "Сыграть в 5 разных risk-игр", 200, "weekly", 5),
+            ("play_50", "Сыграть 50 игр", 400, "weekly", 50),
+            ("win_slot_3", "Победить в слоте 3 раза", 180, "weekly", 3),
+            ("earn_5000", "Заработать 5000 коинов", 350, "weekly", 5000),
+        ]
+        for qk, title, xp, qtype, target in quests:
+            await self.execute(
+                """INSERT OR IGNORE INTO bp_quests (season_id, quest_key, title, xp_reward, quest_type, target_value) VALUES (?, ?, ?, ?, ?, ?)""",
+                (sid, qk, title, xp, qtype, target)
+            )
+
+    async def get_current_bp_season(self) -> Optional[Dict[str, Any]]:
+        """Текущий сезон боевого пропуска. Если сезон истёк — создаётся следующий."""
+        now = int(datetime.now().timestamp())
+        row = await self.fetchone(
+            "SELECT id, name, started_at, ends_at FROM bp_seasons WHERE ends_at > ? ORDER BY ends_at ASC LIMIT 1",
+            (now,)
+        )
+        if not row:
+            await self._ensure_next_bp_season(now)
+            row = await self.fetchone(
+                "SELECT id, name, started_at, ends_at FROM bp_seasons WHERE ends_at > ? ORDER BY ends_at ASC LIMIT 1",
+                (now,)
+            )
+        if not row:
+            return None
+        return {"id": row[0], "name": row[1], "started_at": row[2], "ends_at": row[3]}
+
+    async def _ensure_next_bp_season(self, now: int) -> None:
+        """Создать следующий сезон БП (если текущий истёк)."""
+        last = await self.fetchone("SELECT id, name FROM bp_seasons ORDER BY id DESC LIMIT 1")
+        next_num = (last[0] + 1) if last else 1
+        end_bp = now + 90 * 86400
+        await self.execute(
+            "INSERT INTO bp_seasons (name, started_at, ends_at) VALUES (?, ?, ?)",
+            (f"Боевой пропуск {next_num}", now, end_bp)
+        )
+        await self._init_bp_levels_and_quests()
+
+    async def get_bp_levels(self, season_id: int, max_level: int = 50) -> List[Dict[str, Any]]:
+        """Уровни пропуска: level, xp_required, reward_free_*, reward_premium_*."""
+        rows = await self.fetchall(
+            "SELECT level, xp_required, reward_free_type, reward_free_value, reward_premium_type, reward_premium_value FROM bp_levels WHERE season_id = ? AND level <= ? ORDER BY level",
+            (season_id, max_level)
+        )
+        return [{"level": r[0], "xp_required": r[1], "reward_free_type": r[2], "reward_free_value": r[3], "reward_premium_type": r[4], "reward_premium_value": r[5]} for r in (rows or [])]
+
+    async def get_user_bp_progress(self, user_id: int, season_id: int) -> Dict[str, Any]:
+        """Прогресс пользователя в БП: level, xp."""
+        row = await self.fetchone("SELECT level, xp FROM user_bp_progress WHERE user_id = ? AND season_id = ?", (user_id, season_id))
+        if row:
+            return {"level": row[0], "xp": row[1]}
+        await self.execute("INSERT OR IGNORE INTO user_bp_progress (user_id, season_id, level, xp) VALUES (?, ?, 1, 0)", (user_id, season_id))
+        return {"level": 1, "xp": 0}
+
+    async def add_bp_xp(self, user_id: int, season_id: int, xp: int) -> None:
+        """Добавить XP и при необходимости повысить уровень (по суммарному XP)."""
+        await self.execute(
+            "INSERT OR IGNORE INTO user_bp_progress (user_id, season_id, level, xp) VALUES (?, ?, 1, 0)",
+            (user_id, season_id)
+        )
+        await self.execute(
+            "UPDATE user_bp_progress SET xp = xp + ? WHERE user_id = ? AND season_id = ?",
+            (xp, user_id, season_id)
+        )
+        row = await self.fetchone("SELECT level, xp FROM user_bp_progress WHERE user_id = ? AND season_id = ?", (user_id, season_id))
+        if not row:
+            return
+        _, total_xp = row[0], row[1]
+        levels = await self.get_bp_levels(season_id, max_level=50)
+        xp_sum = 0
+        new_level = 1
+        for L in sorted(levels, key=lambda x: x["level"]):
+            xp_sum += L["xp_required"]
+            if total_xp >= xp_sum:
+                new_level = L["level"]
+        await self.execute(
+            "UPDATE user_bp_progress SET level = ? WHERE user_id = ? AND season_id = ?",
+            (new_level, user_id, season_id)
+        )
+
+    async def get_bp_quests(self, season_id: int) -> List[Dict[str, Any]]:
+        """Список квестов сезона БП."""
+        rows = await self.fetchall(
+            "SELECT quest_key, title, xp_reward, quest_type, target_value FROM bp_quests WHERE season_id = ? ORDER BY quest_type, quest_key",
+            (season_id,)
+        )
+        return [{"quest_key": r[0], "title": r[1], "xp_reward": r[2], "quest_type": r[3], "target_value": r[4]} for r in (rows or [])]
+
+    async def get_user_bp_quest_progress(self, user_id: int, season_id: int) -> Dict[str, int]:
+        """Прогресс по квестам: quest_key -> progress."""
+        rows = await self.fetchall(
+            "SELECT quest_key, progress FROM user_bp_quest_progress WHERE user_id = ? AND season_id = ?",
+            (user_id, season_id)
+        )
+        return {r[0]: r[1] for r in (rows or [])}
+
+    async def progress_bp_quest(self, user_id: int, season_id: int, quest_key: str, delta: int = 1) -> bool:
+        """Увеличить прогресс квеста на delta. Возвращает True если квест выполнен и XP начислен."""
+        from datetime import date
+        today = date.today().isoformat()
+        row = await self.fetchone(
+            "SELECT progress, reset_date FROM user_bp_quest_progress WHERE user_id = ? AND season_id = ? AND quest_key = ?",
+            (user_id, season_id, quest_key)
+        )
+        qrow = await self.fetchone("SELECT target_value, xp_reward, quest_type FROM bp_quests WHERE season_id = ? AND quest_key = ?", (season_id, quest_key))
+        if not qrow:
+            return False
+        target, xp_reward, qtype = int(qrow[0]), int(qrow[1]), qrow[2]
+        old_progress = int(row[0]) if row and row[0] is not None else 0
+        reset_date = row[1] if row and row[1] else None
+        if qtype == "daily" and reset_date != today:
+            progress = delta
+            reset_date = today
+        else:
+            progress = old_progress + delta
+            if not reset_date:
+                reset_date = today
+        await self.execute(
+            """INSERT INTO user_bp_quest_progress (user_id, season_id, quest_key, progress, reset_date) VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(user_id, season_id, quest_key) DO UPDATE SET progress = excluded.progress, reset_date = excluded.reset_date""",
+            (user_id, season_id, quest_key, progress, reset_date)
+        )
+        if progress >= target:
+            await self.add_bp_xp(user_id, season_id, xp_reward)
+            return True
+        return False
+
+    async def claim_bp_level_reward(self, user_id: int, season_id: int, level: int, is_premium: bool) -> bool:
+        """Забрать награду за уровень. Возвращает True если награда выдана."""
+        row = await self.fetchone(
+            "SELECT 1 FROM user_bp_claimed WHERE user_id = ? AND season_id = ? AND level = ? AND is_premium = ?",
+            (user_id, season_id, level, 1 if is_premium else 0)
+        )
+        if row:
+            return False
+        lrow = await self.fetchone(
+            "SELECT reward_free_type, reward_free_value, reward_premium_type, reward_premium_value FROM bp_levels WHERE season_id = ? AND level = ?",
+            (season_id, level)
+        )
+        if not lrow:
+            return False
+        rtype = lrow[2] if is_premium else lrow[0]
+        rval = lrow[3] if is_premium else lrow[1]
+        await self.execute(
+            "INSERT INTO user_bp_claimed (user_id, season_id, level, is_premium) VALUES (?, ?, ?, ?)",
+            (user_id, season_id, level, 1 if is_premium else 0)
+        )
+        if rtype == "coins" and rval > 0:
+            await self.update_balance(user_id, rval, "income", "bp_reward", f"БП ур.{level}")
+            await self.update_total_coins(user_id, rval)
+        return True
+
+    async def get_bp_claimed_levels(self, user_id: int, season_id: int) -> set:
+        """Множество (level, is_premium) уже полученных наград."""
+        rows = await self.fetchall(
+            "SELECT level, is_premium FROM user_bp_claimed WHERE user_id = ? AND season_id = ?",
+            (user_id, season_id)
+        )
+        return {(r[0], bool(r[1])) for r in (rows or [])}
+
+    # ==================== ДНЕВНЫЕ ЗАДАНИЯ БИРЖИ ====================
+
+    BIRZH_QUEST_TYPES = {
+        "buy_jd_100": ("Купить 100 ЖД", "buy", "jd", 500),
+        "sell_kris_100": ("Продать 100 Mr.Kris", "sell", "kris", 300),
+        "buy_sharaga_100": ("Купить 100 Шарага", "buy", "sharaga", 50),
+        "sell_lisaya_100": ("Продать 100 MR.lisaya", "sell", "lisaya", 1000),
+    }
+
+    async def get_birzh_daily_quest(self, user_id: int) -> Optional[Dict[str, Any]]:
+        """Дневное задание биржи на сегодня (одно на пользователя в день)."""
+        from datetime import date
+        import random
+        today = date.today().isoformat()
+        row = await self.fetchone(
+            "SELECT quest_type, completed, reward_claimed FROM birzh_daily_quests WHERE user_id = ? AND quest_date = ? LIMIT 1",
+            (user_id, today)
+        )
+        if row:
+            qtype, completed, reward_claimed = row[0], bool(row[1]), bool(row[2])
+            title, action, coin, reward_coins = self.BIRZH_QUEST_TYPES[qtype]
+            return {"quest_type": qtype, "title": title, "action": action, "coin": coin, "reward_coins": reward_coins, "completed": completed, "reward_claimed": reward_claimed}
+        qtype = random.choice(list(self.BIRZH_QUEST_TYPES.keys()))
+        title, action, coin, reward_coins = self.BIRZH_QUEST_TYPES[qtype]
+        await self.execute(
+            "INSERT INTO birzh_daily_quests (user_id, quest_date, quest_type, completed, reward_claimed) VALUES (?, ?, ?, 0, 0)",
+            (user_id, today, qtype)
+        )
+        return {"quest_type": qtype, "title": title, "action": action, "coin": coin, "reward_coins": reward_coins, "completed": False, "reward_claimed": False}
+
+    async def complete_birzh_quest(self, user_id: int, action: str, coin: str) -> Optional[Dict[str, Any]]:
+        """Если действие совпадает с заданием — отметить выполненным. Вернуть задание с наградой или None."""
+        from datetime import date
+        today = date.today().isoformat()
+        for qtype, (title, a, c, reward_coins) in self.BIRZH_QUEST_TYPES.items():
+            if a == action and c == coin:
+                await self.execute(
+                    "UPDATE birzh_daily_quests SET completed = 1 WHERE user_id = ? AND quest_date = ? AND quest_type = ?",
+                    (user_id, today, qtype)
+                )
+                return {"quest_type": qtype, "title": title, "reward_coins": reward_coins}
+        return None
+
+    async def claim_birzh_quest_reward(self, user_id: int, quest_type: str) -> bool:
+        """Получить награду за задание (один раз). Возвращает True если награда выдана."""
+        from datetime import date
+        today = date.today().isoformat()
+        row = await self.fetchone(
+            "SELECT completed, reward_claimed FROM birzh_daily_quests WHERE user_id = ? AND quest_date = ? AND quest_type = ?",
+            (user_id, today, quest_type)
+        )
+        if not row or not row[0] or row[1]:
+            return False
+        await self.execute(
+            "UPDATE birzh_daily_quests SET reward_claimed = 1 WHERE user_id = ? AND quest_date = ? AND quest_type = ?",
+            (user_id, today, quest_type)
+        )
+        return True
+
+    def _birzh_portfolio_value(self, balances: Dict[str, int], prices: Dict[str, Any]) -> float:
+        """Стоимость портфеля биржи в коинах: сумма (баланс_монет * цена_за_100 / 100)."""
+        total = 0.0
+        for coin in ("sharaga", "kris", "jd", "lisaya"):
+            amt = balances.get(coin, 0) or 0
+            pr = prices.get(coin)
+            if pr is not None:
+                total += amt * (pr / 100.0)
+        return total
+
+    async def ensure_birzh_morning_snapshot(self, user_id: int, snapshot_date: str, portfolio_value: float) -> None:
+        """Записать утренний снимок портфеля, если на эту дату ещё нет записи."""
+        await self.execute(
+            "INSERT OR IGNORE INTO birzh_daily_snapshot (user_id, snapshot_date, morning_value) VALUES (?, ?, ?)",
+            (user_id, snapshot_date, portfolio_value)
+        )
+
+    async def get_birzh_morning_snapshot(self, user_id: int, snapshot_date: str) -> Optional[float]:
+        """Утренняя стоимость портфеля за дату или None."""
+        row = await self.fetchone(
+            "SELECT morning_value FROM birzh_daily_snapshot WHERE user_id = ? AND snapshot_date = ?",
+            (user_id, snapshot_date)
+        )
+        return float(row[0]) if row and row[0] is not None else None
+
+    async def check_birzh_10pct_achievement(self, user_id: int, current_portfolio_value: float) -> bool:
+        """Если портфель вырос на 10% относительно утреннего снимка — выдать достижение. Возвращает True если выдано."""
+        from datetime import date
+        today = date.today().isoformat()
+        morning = await self.get_birzh_morning_snapshot(user_id, today)
+        if morning is None or morning <= 0:
+            return False
+        if current_portfolio_value >= morning * 1.1:
+            return await self.unlock_achievement(user_id, "birzh_10pct_day")
+        return False
+
+    # ==================== ГЛОБАЛЬНЫЕ СОБЫТИЯ ====================
+
+    async def get_global_event(self, event_type: str) -> Optional[Dict[str, Any]]:
+        """Активно ли глобальное событие (день слота, день биржи)."""
+        row = await self.fetchone("SELECT ends_at FROM global_events WHERE event_type = ?", (event_type,))
+        if not row or row[0] <= int(datetime.now().timestamp()):
+            return None
+        return {"event_type": event_type, "ends_at": row[0]}
+
+    async def set_global_event(self, event_type: str, duration_seconds: int) -> None:
+        """Включить глобальное событие на duration_seconds."""
+        now = int(datetime.now().timestamp())
+        ends = now + duration_seconds
+        await self.execute(
+            "INSERT OR REPLACE INTO global_events (event_type, ends_at) VALUES (?, ?)",
+            (event_type, ends)
+        )
+
+    RISK40_SLUGS_TUPLE = (
+        "reactor", "vault", "dicepath", "overheat", "mindlock", "bombline", "liftx", "doza",
+        "shum", "signal", "freeze", "tunnel", "escape", "code", "magnet", "candle",
+        "pulse", "orbit", "wall", "watcher",
+        "controlroom", "firesector", "mutation", "satellite", "mine", "clock", "lab", "bunker",
+        "storm", "navigator", "icepath", "coinstack", "target", "fuse", "web", "logicgate",
+        "depth", "field", "ritual", "trace",
+    )
+
+    async def get_risk40_distinct_count(self, user_id: int) -> int:
+        """Сколько разных risk-игр (из 40) пользователь уже играл."""
+        placeholders = ",".join("?" * len(self.RISK40_SLUGS_TUPLE))
+        row = await self.fetchone(
+            f"SELECT COUNT(DISTINCT game_type) FROM games_sessions WHERE user_id = ? AND game_type IN ({placeholders})",
+            (user_id,) + self.RISK40_SLUGS_TUPLE
+        )
+        return row[0] if row and row[0] is not None else 0
     
     # ==================== МЕТОДЫ ДЛЯ РАБОТЫ С НАЛОГОМ ====================
     
@@ -1825,14 +2416,39 @@ class Database:
     
     async def log_game_session(self, user_id: int, game_type: str, bet: int,
                               result: str, amount_change: int, multiplier: float = 1.0):
-        """Логирование игровой сессии"""
+        """Логирование игровой сессии и прогресс боевого пропуска."""
         now = int(datetime.now().timestamp())
         await self.execute(
-            """INSERT INTO games_sessions 
+            """INSERT INTO games_sessions
                (user_id, game_type, bet, result, amount_change, multiplier, created_at)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (user_id, game_type, bet, result, amount_change, multiplier, now)
         )
+        try:
+            bp = await self.get_current_bp_season()
+            if bp:
+                await self.progress_bp_quest(user_id, bp["id"], "play_5", 1)
+                await self.progress_bp_quest(user_id, bp["id"], "play_20", 1)
+                await self.progress_bp_quest(user_id, bp["id"], "play_50", 1)
+                if result == "win":
+                    await self.progress_bp_quest(user_id, bp["id"], "win_3", 1)
+                    await self.progress_bp_quest(user_id, bp["id"], "win_10", 1)
+                if amount_change > 0:
+                    await self.progress_bp_quest(user_id, bp["id"], "earn_500", min(amount_change, 5000))
+                    await self.progress_bp_quest(user_id, bp["id"], "earn_2000", min(amount_change, 10000))
+                    await self.progress_bp_quest(user_id, bp["id"], "earn_5000", min(amount_change, 10000))
+                if game_type == "fracture":
+                    await self.progress_bp_quest(user_id, bp["id"], "fracture_1", 1)
+                if game_type == "slot":
+                    await self.progress_bp_quest(user_id, bp["id"], "slot_1", 1)
+                    if result == "win":
+                        await self.progress_bp_quest(user_id, bp["id"], "win_slot_3", 1)
+                if game_type in self.RISK40_SLUGS_TUPLE:
+                    await self.progress_bp_quest(user_id, bp["id"], "risk_5", 1)
+                if game_type in ("coin", "guess", "dice", "even", "highlow", "redblack", "lucky7", "double", "triple", "spin"):
+                    await self.progress_bp_quest(user_id, bp["id"], "minigame_3", 1)
+        except Exception:
+            pass
 
     # ==================== АДМИН-ЛОГИ (ИГРЫ) ====================
 

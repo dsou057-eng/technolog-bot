@@ -48,12 +48,80 @@ async def cmd_admin(message: Message):
         "/stats — общая статистика бота (пользователи, игры, баланс)\n"
         "/economy — оборот, налог Технолога, топ выигрышей и проигрышей\n"
         "/logs [N] — последние N записей логов игр (по умолчанию 30)\n\n"
+        "/event тип секунды — глобальное событие: slot_day 86400, birzh_day 7200\n"
+        "/endseason — завершить сезон (сброс MMR), награды топ-3, старт нового\n\n"
         "Роли и баны: /addadmin, /addmoder, /ban, /unban, /deladmin и т.д.\n\n"
         "/skinna0 @user — сброс баланса на 0 за жульничество (только создатель)",
         username, first_name
     )
     sent = await message.answer(text)
     asyncio.create_task(delete_message_after(sent, config.MESSAGE_DELETE_TIMEOUT))
+
+
+@router.message(Command("event"))
+async def cmd_event(message: Message):
+    """Глобальное событие: /event slot_day 86400 или /event birzh_day 7200. Только создатель."""
+    if not await _is_creator(message.from_user.id, message.from_user.username):
+        return
+    parts = (message.text or "").strip().split()
+    if len(parts) < 3:
+        sent = await message.answer(
+            "Использование: /event slot_day 86400  (день слота, +10% выигрыш, 24ч)\n"
+            "              /event birzh_day 7200   (день биржи, меньше разброс, 2ч)"
+        )
+        asyncio.create_task(delete_message_after(sent, config.MESSAGE_DELETE_TIMEOUT))
+        return
+    event_type = parts[1].strip().lower()
+    if event_type not in ("slot_day", "birzh_day"):
+        sent = await message.answer("Тип: slot_day или birzh_day")
+        asyncio.create_task(delete_message_after(sent, config.MESSAGE_DELETE_TIMEOUT))
+        return
+    try:
+        duration = int(parts[2])
+        if duration <= 0 or duration > 86400 * 7:
+            raise ValueError("Секунды: 1 — 604800 (неделя)")
+    except ValueError as e:
+        sent = await message.answer(str(e))
+        asyncio.create_task(delete_message_after(sent, config.MESSAGE_DELETE_TIMEOUT))
+        return
+    await db.set_global_event(event_type, duration)
+    label = "День слота (+10% в /slot)" if event_type == "slot_day" else "День биржи (меньше разброс)"
+    sent = await message.answer(f"✅ Включено: {label}, на {duration} сек.")
+    asyncio.create_task(delete_message_after(sent, config.MESSAGE_DELETE_TIMEOUT))
+    logger.info("event: %s duration=%s by creator", event_type, duration)
+
+
+@router.message(Command("endseason"))
+async def cmd_endseason(message: Message):
+    """Завершить текущий сезон: награды топ-3 по MMR, сброс MMR, новый сезон. Только создатель."""
+    if not await _is_creator(message.from_user.id, message.from_user.username):
+        return
+    season = await db.get_current_season()
+    if not season:
+        sent = await message.answer("Нет активного сезона.")
+        asyncio.create_task(delete_message_after(sent, config.MESSAGE_DELETE_TIMEOUT))
+        return
+    top = await db.get_top_by_mmr(3)
+    rewards = [10000, 5000, 2500]  # коины за 1, 2, 3 место
+    for i, t in enumerate(top):
+        uid = t.get("user_id")
+        if uid and i < len(rewards) and rewards[i] > 0:
+            await db.update_balance(uid, rewards[i], "income", "endseason", "Награда за топ сезона")
+            await db.update_total_coins(uid, rewards[i])
+            try:
+                await message.bot.send_message(
+                    uid,
+                    f"🏆 Сезон завершён! Ты в топ-3: место {i+1}. Награда: {rewards[i]} коинов."
+                )
+            except Exception:
+                pass
+    new_season = await db.end_current_season_and_start_new()
+    name = new_season["name"] if new_season else "—"
+    sent = await message.answer(
+        f"✅ Сезон завершён. Награды выданы топ-3. Новый сезон: {name}"
+    )
+    asyncio.create_task(delete_message_after(sent, config.MESSAGE_DELETE_TIMEOUT))
+    logger.info("endseason: new_season=%s", name)
 
 
 @router.message(Command("skinna0"))

@@ -155,6 +155,28 @@ async def register_routers(dp: Dispatcher):
             logger.warning("Модуль handlers.games не найден, пропускаем")
         except Exception as e:
             logger.error(f"Ошибка регистрации роутера games: {e}")
+
+        # Боевой пропуск (/bp, /battlepass)
+        try:
+            from handlers import battlepass
+            if hasattr(battlepass, 'router'):
+                dp.include_router(battlepass.router)
+                logger.info("Роутер battlepass зарегистрирован")
+        except ImportError:
+            logger.warning("Модуль handlers.battlepass не найден, пропускаем")
+        except Exception as e:
+            logger.error(f"Ошибка регистрации роутера battlepass: {e}")
+
+        # Мини-игры (coin, guess, dice, even, highlow, redblack, lucky7, double, triple, spin)
+        try:
+            from handlers import minigames
+            if hasattr(minigames, 'router'):
+                dp.include_router(minigames.router)
+                logger.info("Роутер minigames зарегистрирован")
+        except ImportError:
+            logger.warning("Модуль handlers.minigames не найден, пропускаем")
+        except Exception as e:
+            logger.error(f"Ошибка регистрации роутера minigames: {e}")
         
         # Инвентарь (market, tehnologmarket, inventory)
         try:
@@ -317,6 +339,14 @@ async def on_startup(bot: Bot):
         await news_service.start_scheduler()
         logger.info("Сервис новостей запущен")
 
+        # Автономность: авто-сброс сезона и опция вайпа балансов
+        try:
+            from services.autonomy import start_autonomy
+            start_autonomy(bot)
+            logger.info("Сервис автономности запущен")
+        except Exception as e:
+            logger.warning("Сервис автономности не запущен: %s", e)
+
         logger.info("Бот готов к работе!")
         
     except Exception as e:
@@ -345,6 +375,12 @@ async def on_shutdown(bot: Bot):
             await news_service.stop_scheduler()
         except Exception as e:
             logger.debug("news_service stop: %s", e)
+
+        try:
+            from services.autonomy import stop_autonomy
+            await stop_autonomy()
+        except Exception as e:
+            logger.debug("autonomy stop: %s", e)
 
         # Закрываем соединение с БД
         await close_db()

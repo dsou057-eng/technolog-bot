@@ -873,6 +873,9 @@ async def cb_risk40_take(callback: CallbackQuery):
     await db.log_admin_game(target_id, username, f"/{slug}", bet, "win", win_amount - bet, tax or 0)
     balance_after = await db.get_balance(target_id)
     await _update_mmr_and_achievements(target_id, slug, "win", balance_after)
+    await db.add_cup_win(target_id, slug)
+    if await db.get_risk40_distinct_count(target_id) >= 40:
+        await db.unlock_achievement(target_id, "all_40_risk")
     caption = await format_message_game_result_async(
         f"вы выиграли. 🎮 Забрал <b>{win_amount}</b> коинов (x{mult:.2f}). Баланс: <b>{balance_after}</b>",
         target_id
@@ -2085,6 +2088,9 @@ async def cmd_slot(message: Message):
             # Выигрыш - показываем 5.jpg (согласно README: "5.jpg — шанс 5% это и есть выигрыш")
             photo_path = config.get_image_path("5.jpg")
             win_to_add = min(win_amount, getattr(config, "FREE_GAME_WIN_CAP", 100)) if use_free_daily else win_amount
+            slot_day = await db.get_global_event("slot_day")
+            if slot_day:
+                win_to_add = int(win_to_add * 1.1)
             _, _, _, tax = await balance_service.add_game_win(
                 user_id=user_id,
                 gross_amount=win_to_add,
@@ -2108,6 +2114,7 @@ async def cmd_slot(message: Message):
             )
             balance_final = await db.get_balance(user_id)
             await _update_mmr_and_achievements(user_id, "slot", "win", balance_final)
+            await db.add_cup_win(user_id, "slot")
             caption = format_message_with_username(
                 f"🎰 <b>ВЫИГРЫШ!</b>\n\n"
                 f"Выиграл: <b>{win_to_add}</b> коинов 💰\n"
@@ -4054,10 +4061,16 @@ FRACTURE_NUM_STEPS = 10
 
 
 def _build_fracture_questions() -> list:
-    """Случайные 10 вопросов без повторов из большого пула (от простых до 8 класса)."""
+    """Случайные 10 вопросов без повторов. Варианты ответов перемешаны (анти-абуз: ИИ не может полагаться на фикс. индекс)."""
     pool = list(FRACTURE_QUESTIONS_POOL)
     game_random.shuffle(pool)
-    return pool[:FRACTURE_NUM_STEPS]
+    result = []
+    for (q_text, options, correct_idx) in pool[:FRACTURE_NUM_STEPS]:
+        opts = list(options)
+        game_random.shuffle(opts)
+        new_correct = opts.index(options[correct_idx])
+        result.append((q_text, opts, new_correct))
+    return result
 
 
 async def _fracture_timeout_task(user_id: int, step_at_start: int):
@@ -4119,12 +4132,18 @@ async def _fracture_timeout_task(user_id: int, step_at_start: int):
             except Exception:
                 pass
             mult = _apply_bet_penalty(bet, mult)
-            win_amount = int(bet * mult)
-            _, balance_before, balance_after, tax = await balance_service.add_game_win(user_id=user_id, gross_amount=win_amount, command_source="/fracture", comment="Излом (финал по таймауту)", bot=bot, chat_id=chat_id, username=username, first_name=first_name)
-            net_added = balance_after - balance_before
+            win_amount = max(1, int(bet * mult))
+            success, balance_before, balance_after, tax = await balance_service.add_game_win(user_id=user_id, gross_amount=win_amount, command_source="/fracture", comment="Излом (финал по таймауту)", bot=bot, chat_id=chat_id, username=username, first_name=first_name)
+            if not success:
+                await balance_service.add_balance(user_id, bet, command_source="/fracture", comment="Возврат ставки (излом, таймаут)", bot=bot, chat_id=chat_id, username=username, first_name=first_name)
+                balance_after = await db.get_balance(user_id)
+                net_added = bet
+            else:
+                net_added = balance_after - balance_before
             await db.log_game_session(user_id, "fracture", bet, "win", net_added - bet, mult)
             await db.log_admin_game(user_id, username, "/fracture", bet, "win", net_added - bet, tax or 0)
             await _update_mmr_and_achievements(user_id, "fracture", "win", balance_after, chat_id=chat_id, bot=bot)
+            await db.add_cup_win(user_id, "fracture")
             caption = format_message_with_username(f"🧩 <b>Излом решения</b>\n\n{style_comment}\n\n✅ Зачислено <b>+{net_added}</b> коинов (x{mult:.2f}). Баланс: <b>{balance_after}</b>", username, first_name)
         else:
             await db.log_game_session(user_id, "fracture", bet, "loss", -bet, 0)
@@ -4361,16 +4380,22 @@ async def cb_fracture(callback: CallbackQuery):
         ev_type = ev.get("event_type") if ev else None
         mult = events_service.apply_event_to_multiplier(mult, ev_type, is_win=True)
         mult = _apply_bet_penalty(bet, mult)
-        win_amount = int(bet * mult)
-        _, balance_before, balance_after, tax = await balance_service.add_game_win(
+        win_amount = max(1, int(bet * mult))
+        success, balance_before, balance_after, tax = await balance_service.add_game_win(
             user_id=user_id, gross_amount=win_amount,
             command_source="/fracture", comment="Излом решения",
             bot=bot, chat_id=chat_id, username=username, first_name=first_name,
         )
-        net_added = balance_after - balance_before
+        if not success:
+            await balance_service.add_balance(user_id, bet, command_source="/fracture", comment="Возврат ставки (излом)", bot=bot, chat_id=chat_id, username=username, first_name=first_name)
+            balance_after = await db.get_balance(user_id)
+            net_added = bet
+        else:
+            net_added = balance_after - balance_before
         await db.log_game_session(user_id, "fracture", bet, "win", net_added - bet, mult)
         await db.log_admin_game(user_id, username, "/fracture", bet, "win", net_added - bet, tax or 0)
         await _update_mmr_and_achievements(user_id, "fracture", "win", balance_after, chat_id=chat_id, bot=bot)
+        await db.add_cup_win(user_id, "fracture")
         caption = format_message_with_username(
             f"🧩 <b>Излом решения</b>\n\n{style_comment}\n\n✅ Зачислено <b>+{net_added}</b> коинов (x{mult:.2f}). Баланс: <b>{balance_after}</b>",
             username, first_name

@@ -69,7 +69,7 @@ async def cmd_profile(message: Message):
     else:
         goal_parts.append("🏆 Ты в высшей лиге — дерзай в топ!")
     if mmr < 2000 and total_games < min_games_legend:
-        goal_parts.append(f"📋 До Легенды нужно <b>{min_games_legend}</b> игр (сыграно: <b>{total_games}</b>)")
+        goal_parts.append(f"📋 Игр сыграно: <b>{total_games}</b>. Для Легенды — играй в разные игры и набирай опыт.")
     goal_line = "\n".join(goal_parts)
     lines = [
         f"👤 <b>ПРОФИЛЬ</b>",
@@ -496,6 +496,104 @@ async def cmd_checkaccount(message: Message):
         logger.error(f"checkaccount avatar {e}")
         sent = await message.answer(caption)
     asyncio.create_task(delete_message_after(sent, config.MESSAGE_DELETE_TIMEOUT))
+
+
+@router.message(Command("season"))
+async def cmd_season(message: Message):
+    """Текущий сезон, топ по MMR, когда заканчивается."""
+    user_id = message.from_user.id
+    username = message.from_user.username or ""
+    first_name = message.from_user.first_name or ""
+
+    season = await db.get_current_season()
+    if not season:
+        text = format_message_with_username("Сезон не активен. Скоро начнётся новый.", username, first_name)
+        sent = await message.answer(text)
+        asyncio.create_task(delete_message_after(sent, config.MESSAGE_DELETE_TIMEOUT))
+        return
+
+    from datetime import datetime
+    ends_ts = season["ends_at"]
+    ends_str = datetime.fromtimestamp(ends_ts).strftime("%d.%m.%Y") if ends_ts else "—"
+    top = await db.get_top_by_mmr(10)
+    lines = [
+        f"📊 <b>{season['name']}</b>",
+        f"Завершение: {ends_str}",
+        "",
+        "🏆 <b>Топ по MMR (лига):</b>",
+    ]
+    for i, t in enumerate(top, 1):
+        un = (t.get("username") or str(t.get("user_id", "")))[:20]
+        lines.append(f"{i}. @{un} — {t.get('mmr', 0)} MMR")
+    text = format_message_with_username("\n".join(lines), username, first_name)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Кубок: слот", callback_data="cup_slot"), InlineKeyboardButton(text="Кубок: излом", callback_data="cup_fracture")],
+    ])
+    sent = await message.answer(text, reply_markup=kb)
+    asyncio.create_task(delete_message_after(sent, config.MESSAGE_DELETE_TIMEOUT))
+
+
+@router.message(Command("cup"))
+async def cmd_cup(message: Message):
+    """Кубок по игре: /cup slot или /cup fracture."""
+    username = message.from_user.username or ""
+    first_name = message.from_user.first_name or ""
+    parts = (message.text or "").strip().split()
+    game = (parts[1].lower() if len(parts) > 1 else "").strip()
+    if game not in ("slot", "fracture"):
+        text = format_message_with_username(
+            "Использование: /cup slot или /cup fracture — таблица побед в этой игре за сезон.",
+            username, first_name
+        )
+        sent = await message.answer(text)
+        asyncio.create_task(delete_message_after(sent, config.MESSAGE_DELETE_TIMEOUT))
+        return
+
+    season = await db.get_current_season()
+    if not season:
+        text = format_message_with_username("Сезон не активен.", username, first_name)
+        sent = await message.answer(text)
+        asyncio.create_task(delete_message_after(sent, config.MESSAGE_DELETE_TIMEOUT))
+        return
+
+    title = "Слот" if game == "slot" else "Излом"
+    top = await db.get_cup_leaderboard(game, 10)
+    lines = [f"🏆 <b>Кубок: {title}</b> ({season['name']})", ""]
+    if not top:
+        lines.append("Побед пока нет.")
+    else:
+        for i, t in enumerate(top, 1):
+            un = (t.get("username") or str(t.get("user_id", "")))[:20]
+            lines.append(f"{i}. @{un} — {t.get('wins', 0)} побед")
+    text = format_message_with_username("\n".join(lines), username, first_name)
+    sent = await message.answer(text)
+    asyncio.create_task(delete_message_after(sent, config.MESSAGE_DELETE_TIMEOUT))
+
+
+@router.callback_query(F.data.in_({"cup_slot", "cup_fracture"}))
+async def cb_cup(callback: CallbackQuery):
+    game = "slot" if callback.data == "cup_slot" else "fracture"
+    username = callback.from_user.username or ""
+    first_name = callback.from_user.first_name or ""
+    season = await db.get_current_season()
+    if not season:
+        await callback.answer("Сезон не активен")
+        return
+    title = "Слот" if game == "slot" else "Излом"
+    top = await db.get_cup_leaderboard(game, 10)
+    lines = [f"🏆 <b>Кубок: {title}</b> ({season['name']})", ""]
+    if not top:
+        lines.append("Побед пока нет.")
+    else:
+        for i, t in enumerate(top, 1):
+            un = (t.get("username") or str(t.get("user_id", "")))[:20]
+            lines.append(f"{i}. @{un} — {t.get('wins', 0)} побед")
+    text = format_message_with_username("\n".join(lines), username, first_name)
+    await callback.answer()
+    try:
+        await callback.message.edit_text(text)
+    except Exception:
+        await callback.message.answer(text)
 
 
 @router.message(Command("lvl"))
