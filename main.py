@@ -442,6 +442,12 @@ async def on_shutdown(bot: Bot):
     
     try:
         logger.info("Остановка бота...")
+        # Снимаем webhook, чтобы не осталось «мёртвого» URL и не было конфликта с новым инстансом
+        try:
+            await bot.delete_webhook(drop_pending_updates=False)
+            logger.info("Webhook снят")
+        except Exception as e:
+            logger.debug("delete_webhook: %s", e)
         
         # Останавливаем задачу очистки эффектов
         await effects_service.stop_cleanup_task()
@@ -554,7 +560,7 @@ async def main():
         if use_wh and getattr(config, "WEBHOOK_URL", None):
             from aiohttp import web
             from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
-            logger.info("Режим webhook (WEBHOOK_URL задан)")
+            logger.info("Режим webhook (WEBHOOK_URL задан) — убедись, что polling нигде не запущен (один инстанс)")
             app = web.Application()
             async def health(_):
                 return web.Response(text="ok")
@@ -568,6 +574,7 @@ async def main():
             web.run_app(app, host="0.0.0.0", port=port)
         else:
             logger.info("Запуск polling")
+            logger.info("ВНИМАНИЕ: если видишь Conflict (getUpdates), значит бот уже запущен в другом месте — закрой второй инстанс или на сервере задай WEBHOOK_URL и используй webhook.")
             logger.info(f"Режим работы: {config.ENVIRONMENT}")
             try:
                 await dp.start_polling(
