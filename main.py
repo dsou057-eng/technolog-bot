@@ -115,6 +115,8 @@ async def register_routers(dp: Dispatcher):
             logger.warning("Модуль handlers.base не найден: %s", e, exc_info=True)
         except Exception as e:
             logger.error("Ошибка регистрации роутера base: %s", e, exc_info=True)
+            import traceback
+            logger.error("Traceback base: %s", traceback.format_exc())
         if not base_loaded:
             # Fallback: полные тексты /start и /help как в base.py, если модуль base не загрузился на сервере
             from utils import format_message_with_username
@@ -187,7 +189,7 @@ async def register_routers(dp: Dispatcher):
         except ImportError:
             logger.warning("Модуль handlers.news не найден, пропускаем")
         except Exception as e:
-            logger.error(f"Ошибка регистрации роутера news: {e}")
+            logger.error("Ошибка регистрации роутера news: %s", e, exc_info=True)
         
         # Экономика (balance, refill, donate, top)
         try:
@@ -198,7 +200,7 @@ async def register_routers(dp: Dispatcher):
         except ImportError:
             logger.warning("Модуль handlers.economy не найден, пропускаем")
         except Exception as e:
-            logger.error(f"Ошибка регистрации роутера economy: {e}")
+            logger.error("Ошибка регистрации роутера economy: %s", e, exc_info=True)
         
         # Premium (premium, timeprem, effect)
         try:
@@ -209,7 +211,7 @@ async def register_routers(dp: Dispatcher):
         except ImportError:
             logger.warning("Модуль handlers.premium не найден, пропускаем")
         except Exception as e:
-            logger.error(f"Ошибка регистрации роутера premium: {e}")
+            logger.error("Ошибка регистрации роутера premium: %s", e, exc_info=True)
         
         # Игры (plsdon, slot, konopla, kripta)
         try:
@@ -220,7 +222,7 @@ async def register_routers(dp: Dispatcher):
         except ImportError:
             logger.warning("Модуль handlers.games не найден, пропускаем")
         except Exception as e:
-            logger.error(f"Ошибка регистрации роутера games: {e}")
+            logger.error("Ошибка регистрации роутера games: %s", e, exc_info=True)
 
         # Боевой пропуск (/bp, /battlepass)
         try:
@@ -231,7 +233,7 @@ async def register_routers(dp: Dispatcher):
         except ImportError:
             logger.warning("Модуль handlers.battlepass не найден, пропускаем")
         except Exception as e:
-            logger.error(f"Ошибка регистрации роутера battlepass: {e}")
+            logger.error("Ошибка регистрации роутера battlepass: %s", e, exc_info=True)
 
         # Мини-игры (coin, guess, dice, even, highlow, redblack, lucky7, double, triple, spin)
         try:
@@ -242,7 +244,7 @@ async def register_routers(dp: Dispatcher):
         except ImportError:
             logger.warning("Модуль handlers.minigames не найден, пропускаем")
         except Exception as e:
-            logger.error(f"Ошибка регистрации роутера minigames: {e}")
+            logger.error("Ошибка регистрации роутера minigames: %s", e, exc_info=True)
         
         # Инвентарь (market, tehnologmarket, inventory)
         try:
@@ -253,7 +255,7 @@ async def register_routers(dp: Dispatcher):
         except ImportError:
             logger.warning("Модуль handlers.inventory не найден, пропускаем")
         except Exception as e:
-            logger.error(f"Ошибка регистрации роутера inventory: {e}")
+            logger.error("Ошибка регистрации роутера inventory: %s", e, exc_info=True)
         
         # Аккаунт (account, accountphoto, accountinfo, status, lvl)
         try:
@@ -264,7 +266,7 @@ async def register_routers(dp: Dispatcher):
         except ImportError:
             logger.warning("Модуль handlers.account не найден, пропускаем")
         except Exception as e:
-            logger.error(f"Ошибка регистрации роутера account: {e}")
+            logger.error("Ошибка регистрации роутера account: %s", e, exc_info=True)
         
         # Медиа и шуточные команды отключены — бот Tehnolog Games: только игры, экономика, профиль
         # (media, sperm, skinna0 не регистрируем)
@@ -277,7 +279,7 @@ async def register_routers(dp: Dispatcher):
         except ImportError:
             logger.warning("Модуль handlers.rofl не найден, пропускаем")
         except Exception as e:
-            logger.error(f"Ошибка регистрации роутера rofl: {e}")
+            logger.error("Ошибка регистрации роутера rofl: %s", e, exc_info=True)
 
         # Админ (если нужен)
         try:
@@ -288,7 +290,7 @@ async def register_routers(dp: Dispatcher):
         except ImportError:
             logger.warning("Модуль handlers.admin не найден, пропускаем")
         except Exception as e:
-            logger.error(f"Ошибка регистрации роутера admin: {e}")
+            logger.error("Ошибка регистрации роутера admin: %s", e, exc_info=True)
         
         logger.info("Регистрация роутеров завершена")
         
@@ -495,7 +497,7 @@ async def main():
             sys.exit(1)
         
         # Инициализация БД
-        logger.info("Инициализация базы данных...")
+        logger.info("Инициализация базы данных... путь: %s", getattr(config, "DB_PATH", None))
         await init_db()
         logger.info("База данных инициализирована")
         
@@ -537,7 +539,8 @@ async def main():
         @dp.error()
         async def on_error(event: ErrorEvent):
             log = logging.getLogger(__name__)
-            log.error("Ошибка при обработке: %s", event.exception, exc_info=True)
+            exc = event.exception
+            log.error("Ошибка при обработке: %s | тип: %s", exc, type(exc).__name__, exc_info=True)
             try:
                 u = event.update
                 if u.message:
@@ -560,7 +563,9 @@ async def main():
         if use_wh and getattr(config, "WEBHOOK_URL", None):
             from aiohttp import web
             from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
-            logger.info("Режим webhook (WEBHOOK_URL задан) — убедись, что polling нигде не запущен (один инстанс)")
+            wh_url = config.WEBHOOK_URL
+            port = int(config.PORT)
+            logger.info("Режим webhook: URL=%s, PORT=%s — убедись, что polling нигде не запущен (один инстанс)", wh_url, port)
             app = web.Application()
             async def health(_):
                 return web.Response(text="ok")
@@ -574,8 +579,10 @@ async def main():
             web.run_app(app, host="0.0.0.0", port=port)
         else:
             logger.info("Запуск polling")
+            if getattr(config, "WEBHOOK_URL", None):
+                logger.warning("WEBHOOK_URL задан, но режим polling — задай ENVIRONMENT=prod чтобы использовать webhook на сервере.")
             logger.info("ВНИМАНИЕ: если видишь Conflict (getUpdates), значит бот уже запущен в другом месте — закрой второй инстанс или на сервере задай WEBHOOK_URL и используй webhook.")
-            logger.info(f"Режим работы: {config.ENVIRONMENT}")
+            logger.info("Режим работы: %s", config.ENVIRONMENT)
             try:
                 await dp.start_polling(
                     bot,

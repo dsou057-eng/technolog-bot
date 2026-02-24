@@ -100,7 +100,7 @@ class Config(BaseSettings):
 
     # Экономика
     DEFAULT_COMMISSION: int = 5  # комиссия за команды (коины)
-    FREE_COMMANDS: list = ["/help", "/start", "/helpgame", "/balance", "/refill", "/donate", "/top", "/admins", "/report", "/news", "/obnova"]
+    FREE_COMMANDS: list = ["/help", "/start", "/helpgame", "/balance", "/refill", "/donate", "/top", "/admins", "/report", "/news", "/obnova", "/tutorial", "/profile"]
     # Игровые команды, меню, профиль, медиа — комиссию не списываем
     COMMISSION_EXEMPT: list = [
         "/slot", "/konopla", "/kripta", "/plsdon", "/chisla", "/freedurev", "/almaz",

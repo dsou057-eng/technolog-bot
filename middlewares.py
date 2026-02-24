@@ -802,13 +802,13 @@ class LoggingMiddleware(BaseMiddleware):
         # Логируем начало обработки
         if user_id:
             logger.info(f"[{user_id}] @{username} - {action}")
-            
-            # Обновляем время последней активности
-            await db.update_user_last_active(user_id)
-            
-            # Обновляем username если изменился
-            if username:
-                await db.update_user_username(user_id, username)
+            try:
+                # Обновляем время последней активности
+                await db.update_user_last_active(user_id)
+                if username:
+                    await db.update_user_username(user_id, username)
+            except Exception as e:
+                logger.warning("LoggingMiddleware: обновление user/username: %s", e)
             
             # Premium 7d: при первом сообщении в чате раз в 24ч — «👑 @user зашёл в чат — целуйте экран»
             if isinstance(event, Message) and event.chat and event.chat.id:

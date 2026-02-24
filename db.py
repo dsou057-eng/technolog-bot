@@ -51,7 +51,8 @@ class Database:
             await self.connection.execute("PRAGMA journal_mode=WAL")
             await self.connection.execute("PRAGMA foreign_keys=ON")
             await self.connection.commit()
-            logger.info(f"Подключение к БД установлено: {self.db_path}")
+            path_abs = Path(self.db_path).resolve()
+            logger.info("Подключение к БД установлено: %s", path_abs)
         except Exception as e:
             logger.error(f"Ошибка подключения к БД: {e}")
             raise
