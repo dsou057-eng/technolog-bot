@@ -305,7 +305,10 @@ async def on_startup(bot: Bot):
     logger = logging.getLogger(__name__)
     
     try:
-        if config.use_webhook():
+        use_wh = getattr(config, "use_webhook", None)
+        if callable(use_wh):
+            use_wh = use_wh()
+        if use_wh and getattr(config, "WEBHOOK_URL", None):
             url = config.WEBHOOK_URL
             if url:
                 await bot.set_webhook(url)
@@ -478,7 +481,12 @@ async def main():
         dp.shutdown.register(on_shutdown)
         
         # Запуск: webhook (Railway/сервер) или polling (локально)
-        if config.use_webhook():
+        use_wh = getattr(config, "use_webhook", None)
+        if callable(use_wh):
+            use_wh = use_wh()
+        elif not isinstance(use_wh, bool):
+            use_wh = bool(getattr(config, "WEBHOOK_URL", None) and getattr(config, "ENVIRONMENT", "") == "prod")
+        if use_wh and getattr(config, "WEBHOOK_URL", None):
             from aiohttp import web
             from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
             logger.info("Режим webhook (WEBHOOK_URL задан)")
