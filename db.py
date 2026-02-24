@@ -341,21 +341,7 @@ class Database:
                 await self.execute("ALTER TABLE users ADD COLUMN mmr INTEGER DEFAULT 0 NOT NULL")
             except Exception:
                 pass
-            # Миграция: цена технолог-коина в рублях для /birzh
-            try:
-                await self.execute("ALTER TABLE birzh_state ADD COLUMN technolog_rub REAL DEFAULT 1.0")
-            except Exception:
-                pass
-            for col, default in [("kris_price", "1250"), ("jd_price", "7500"), ("lisaya_price", "60000")]:
-                try:
-                    await self.execute(f"ALTER TABLE birzh_state ADD COLUMN {col} INTEGER DEFAULT {default}")
-                except Exception:
-                    pass
-            for col in ["kris_balance", "jd_balance", "lisaya_balance"]:
-                try:
-                    await self.execute(f"ALTER TABLE user_birzh ADD COLUMN {col} INTEGER DEFAULT 0")
-                except Exception:
-                    pass
+            # Миграции birzh_state/user_birzh выполняются после CREATE TABLE этих таблиц (см. ниже)
 
             # Таблица: 1 бесплатная игра в сутки при балансе 0 (дата последнего использования)
             await self.execute("""
@@ -586,6 +572,21 @@ class Database:
                     "INSERT INTO birzh_state (id, price, updated_at) VALUES (1, 50, ?)",
                     (int(datetime.now().timestamp()),)
                 )
+            # Миграция: доп. колонки биржи (после создания таблиц)
+            try:
+                await self.execute("ALTER TABLE birzh_state ADD COLUMN technolog_rub REAL DEFAULT 1.0")
+            except Exception:
+                pass
+            for col, default in [("kris_price", "1250"), ("jd_price", "7500"), ("lisaya_price", "60000")]:
+                try:
+                    await self.execute(f"ALTER TABLE birzh_state ADD COLUMN {col} INTEGER DEFAULT {default}")
+                except Exception:
+                    pass
+            for col in ["kris_balance", "jd_balance", "lisaya_balance"]:
+                try:
+                    await self.execute(f"ALTER TABLE user_birzh ADD COLUMN {col} INTEGER DEFAULT 0")
+                except Exception:
+                    pass
 
             # /echo: дата последней выдачи 50 коинов (раз в сутки)
             await self.execute("""

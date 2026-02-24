@@ -2051,7 +2051,8 @@ async def cmd_slot(message: Message):
     balance = await db.get_balance(user_id)
     use_free_daily = False
     if balance < bet_charged:
-        if balance == 0 and not await db.get_free_game_used_today(user_id):
+        free_daily_ok = getattr(config, "SLOT_FREE_GAME_DAILY_ENABLED", False) and balance == 0 and not await db.get_free_game_used_today(user_id)
+        if free_daily_ok:
             bet_charged = 0
             use_free_daily = True
         else:

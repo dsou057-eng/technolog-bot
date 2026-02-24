@@ -116,12 +116,65 @@ async def register_routers(dp: Dispatcher):
         except Exception as e:
             logger.error("Ошибка регистрации роутера base: %s", e, exc_info=True)
         if not base_loaded:
-            # Fallback: чтобы бот не игнорировал /start и /help при отсутствии base (например на сервере)
+            # Fallback: полные тексты /start и /help как в base.py, если модуль base не загрузился на сервере
+            from utils import format_message_with_username
+            from db import db as _db
             fallback_router = Router()
             @fallback_router.message(Command("start"))
-            async def _fallback_start(msg): await msg.answer("Привет! Я Tehnolog Games. Используй /help для списка команд.")
+            async def _fallback_start(msg):
+                uid = msg.from_user.id
+                un = msg.from_user.username or ""
+                fn = msg.from_user.first_name or ""
+                base_text = (
+                    "👋 Привет! Я Tehnolog Games — бот с играми на коины, экономикой и профилем.\n\n"
+                    "• <b>/help</b> — полный список команд и разделов (игры, экономика, профиль).\n"
+                    "• <b>/balance</b> — твой баланс и уровень.\n"
+                    "• <b>/helpgame название</b> — подробные правила любой игры (например: /helpgame slot или /helpgame fracture).\n\n"
+                )
+                try:
+                    u = await _db.get_user(uid)
+                    if not u:
+                        await _db.create_user(uid, un)
+                    tier = await _db.get_user_tier(uid)
+                    if tier == "newcomer":
+                        base_text += "🆕 Ты новичок — загляни в <b>/tutorial</b>, там покажем достижения, биржу, лиги и квесты.\n\n"
+                    elif tier == "pro":
+                        base_text += "🔥 Ты уже в деле — не забудь <b>/bp</b> (боевой пропуск), <b>/season</b> и <b>/cup</b> за наградами.\n\n"
+                except Exception:
+                    pass
+                base_text += "Начни с /help — там всё по полочкам."
+                await msg.answer(format_message_with_username(base_text, un, fn))
             @fallback_router.message(Command("help"))
-            async def _fallback_help(msg): await msg.answer("Команды: /start, /balance, /profile, /slot, /birzh, /bp, /tutorial, /season. Игры: /slot, /fracture, /minigames и др.")
+            async def _fallback_help(msg):
+                un = msg.from_user.username or ""
+                fn = msg.from_user.first_name or ""
+                help_text = format_message_with_username(
+                    "🎮 <b>Tehnolog Games</b> v1.2 — игры на коины, экономика, биржа, профиль с лигой\n\n", un, fn
+                )
+                help_text += "📌 <b>v1.2</b> — биржа: Шарага, Mr.Kris, ЖД, MR.lisayaderektrisa. Исправлен излом решения. /obnova — список изменений.\n\n"
+                help_text += "📋 <b>БАЗОВЫЕ КОМАНДЫ</b>\n"
+                help_text += "/help — этот список | /balance — баланс и уровень | /top — топ по балансу\n"
+                help_text += "/news — игровые новости | /admins — кто управляет | /report — репорт\n\n"
+                help_text += "💰 <b>ЭКОНОМИКА</b>\n"
+                help_text += "/refill — +100 коинов раз в 2 часа | /donate @user сумма комментарий — перевод\n\n"
+                help_text += "🎲 <b>ИГРЫ: ОСНОВНЫЕ</b>\n"
+                help_text += "/slot — слоты | /konopla — один раунд | /kripta сумма — Lucky Jet\n"
+                help_text += "/almaz сумма — алмазы | /chisla @user сумма — PvP-дуэль | /plsdon — задонать боту\n\n"
+                help_text += "🎰 <b>ИГРЫ: МУЛЬТИПЛЕЕР И РЫНОК</b>\n"
+                help_text += "/rulet сумма — рулетка (2–8 игроков) | /frekaz сумма — фреказ | /perekyp сумма — перекуп\n"
+                help_text += "/birzh — биржа: Шарага, Mr.Kris, ЖД, MR.lisayaderektrisa, дневные задания\n\n"
+                help_text += "🔄 <b>ИГРЫ: РИСК / ЗАБРАТЬ</b> (40 штук)\n"
+                help_text += "/reactor, /vault, /dicepath и др. — множитель растёт, «Ещё» и «Забрать». /helpgame reactor\n\n"
+                help_text += "✨ <b>ОСОБЫЕ ИГРЫ</b>\n"
+                help_text += "/random — судьба технолога | /gamerandom — сбой матрицы | /blackmarket — чёрный рынок\n"
+                help_text += "/echo — эхо решений | /fracture [ставка] — излом решения | /mirror — зеркало\n\n"
+                help_text += "👤 <b>ПРОФИЛЬ</b>\n"
+                help_text += "/profile — профиль, лига, достижения | /pererozhd — перерождение | /premium — тарифы\n\n"
+                help_text += "🎫 <b>БОЕВОЙ ПРОПУСК И СЕЗОНЫ</b>\n"
+                help_text += "/bp — боевой пропуск (квесты, уровни, награды) | /season — сезон и топ | /cup slot, /cup fracture — кубки\n\n"
+                help_text += "📖 /helpgame название — правила игры | /tutorial — обучение для новичков | /obnova — что нового\n"
+                help_text += "/cancel — отмена игры | /status — активная игра | /statusmarket — магазин статусов. Tehnolog Games"
+                await msg.answer(help_text)
             dp.include_router(fallback_router)
             logger.warning("Подключён fallback-роутер для /start и /help (handlers.base не загружен)")
 

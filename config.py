@@ -156,6 +156,7 @@ class Config(BaseSettings):
     SLOT_BET: int = 20
     SLOT_WIN: int = 150
     SLOT_WIN_CHANCE: float = 0.05  # 5% база
+    SLOT_FREE_GAME_DAILY_ENABLED: bool = Field(default=False, env="SLOT_FREE_GAME_DAILY_ENABLED")  # если False — при балансе 0 играть нельзя
     
     KONOPLA_BET: int = 30
     KONOPLA_LOSS: int = 70
