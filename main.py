@@ -14,6 +14,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import ErrorEvent
 
 from config import config
 from db import init_db, close_db
@@ -38,10 +39,12 @@ from services.effects import effects_service
 def setup_logging():
     """
     Настройка системы логирования
-    Логи пишутся в файл и в консоль
+    Логи пишутся в файл и в консоль. На сервере (Railway) при read-only ФС не падаем.
     """
-    # Создаем директорию для логов если её нет
-    config.LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        config.LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        logging.warning("Не удалось создать директорию логов (возможно read-only): %s", e)
     
     # Настройка формата логов
     log_format = logging.Formatter(
@@ -56,23 +59,21 @@ def setup_logging():
     # Очистка существующих handlers
     root_logger.handlers.clear()
     
-    # Handler для файла с ротацией
-    file_handler = RotatingFileHandler(
-        filename=str(config.LOG_FILE),
-        maxBytes=config.LOG_MAX_SIZE_MB * 1024 * 1024,  # Конвертируем MB в байты
-        backupCount=config.LOG_BACKUP_COUNT,
-        encoding='utf-8'
-    )
-    file_handler.setLevel(getattr(logging, config.LOG_LEVEL))
-    file_handler.setFormatter(log_format)
-    
-    # Handler для консоли
+    try:
+        file_handler = RotatingFileHandler(
+            filename=str(config.LOG_FILE),
+            maxBytes=config.LOG_MAX_SIZE_MB * 1024 * 1024,
+            backupCount=config.LOG_BACKUP_COUNT,
+            encoding='utf-8'
+        )
+        file_handler.setLevel(getattr(logging, config.LOG_LEVEL))
+        file_handler.setFormatter(log_format)
+        root_logger.addHandler(file_handler)
+    except OSError as e:
+        logging.warning("Не удалось открыть лог-файл (возможно read-only): %s", e)
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(logging.INFO)
     console_handler.setFormatter(log_format)
-    
-    # Добавляем handlers
-    root_logger.addHandler(file_handler)
     root_logger.addHandler(console_handler)
     
     # Настройка логирования для aiogram (уменьшаем шум)
@@ -304,6 +305,11 @@ async def on_startup(bot: Bot):
     logger = logging.getLogger(__name__)
     
     try:
+        if config.use_webhook():
+            url = config.WEBHOOK_URL
+            if url:
+                await bot.set_webhook(url)
+                logger.info("Webhook установлен: %s", url)
         # Получаем информацию о боте
         bot_info = await bot.get_me()
         logger.info("=" * 50)
@@ -312,12 +318,15 @@ async def on_startup(bot: Bot):
         logger.info(f"Имя бота: {bot_info.first_name}")
         logger.info("=" * 50)
         
-        # Проверяем наличие необходимых директорий
+        # Проверяем наличие необходимых директорий (на сервере могут быть read-only)
         required_dirs = [config.LOGS_DIR, config.ASSETS_DIR, config.IMAGES_DIR, config.AUDIO_DIR, config.VIDEO_DIR]
         for directory in required_dirs:
-            if not directory.exists():
-                directory.mkdir(parents=True, exist_ok=True)
-                logger.info(f"Создана директория: {directory}")
+            try:
+                if not directory.exists():
+                    directory.mkdir(parents=True, exist_ok=True)
+                    logger.info(f"Создана директория: {directory}")
+            except OSError as e:
+                logger.warning("Директория %s: %s", directory, e)
         
         # Проверяем наличие ассетов
         missing_assets = config.validate_assets()
@@ -450,26 +459,54 @@ async def main():
         logger.info("Регистрация роутеров...")
         await register_routers(dp)
         
+        # Глобальный обработчик ошибок — чтобы пользователь всегда получал ответ при сбое
+        @dp.error()
+        async def on_error(event: ErrorEvent):
+            log = logging.getLogger(__name__)
+            log.error("Ошибка при обработке: %s", event.exception, exc_info=True)
+            try:
+                u = event.update
+                if u.message:
+                    await u.message.answer("Произошла ошибка. Попробуй позже или /help.")
+                elif u.callback_query:
+                    await u.callback_query.answer("Ошибка", show_alert=True)
+            except Exception:
+                pass
+        
         # Регистрация обработчиков событий жизненного цикла
         dp.startup.register(on_startup)
         dp.shutdown.register(on_shutdown)
         
-        # Запуск polling
-        logger.info("Запуск polling...")
-        logger.info(f"Режим работы: {config.ENVIRONMENT}")
-        
-        try:
-            # В aiogram 3.x start_polling автоматически обрабатывает graceful shutdown
-            await dp.start_polling(
-                bot,
-                allowed_updates=dp.resolve_used_update_types(),
-                close_bot_session=True
-            )
-        except KeyboardInterrupt:
-            logger.info("Получен сигнал прерывания (Ctrl+C)")
-        except Exception as e:
-            logger.error(f"Ошибка при работе polling: {e}", exc_info=True)
-            raise
+        # Запуск: webhook (Railway/сервер) или polling (локально)
+        if config.use_webhook():
+            from aiohttp import web
+            from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+            logger.info("Режим webhook (WEBHOOK_URL задан)")
+            app = web.Application()
+            async def health(_):
+                return web.Response(text="ok")
+            app.router.add_get("/", health)
+            app.router.add_get("/health", health)
+            webhook_requests_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
+            webhook_requests_handler.register(app, path=config.WEBHOOK_PATH)
+            setup_application(app, dp, bot=bot)
+            port = int(config.PORT)
+            logger.info("Запуск webhook на 0.0.0.0:%s", port)
+            web.run_app(app, host="0.0.0.0", port=port)
+        else:
+            logger.info("Запуск polling")
+            logger.info(f"Режим работы: {config.ENVIRONMENT}")
+            try:
+                await dp.start_polling(
+                    bot,
+                    allowed_updates=dp.resolve_used_update_types() or None,
+                    close_bot_session=True
+                )
+            except KeyboardInterrupt:
+                logger.info("Получен сигнал прерывания (Ctrl+C)")
+            except Exception as e:
+                logger.error(f"Ошибка при работе polling: {e}", exc_info=True)
+                raise
         
     except Exception as e:
         logger.critical(f"Критическая ошибка при запуске бота: {e}", exc_info=True)

@@ -113,6 +113,14 @@ class AntifloodMiddleware(BaseMiddleware):
             
             if is_muted and mute_until and mute_until > now:
                 logger.warning(f"Пользователь {user_id} заблокирован антиспамом до {datetime.fromtimestamp(mute_until)}")
+                bot = getattr(event, "bot", None) or (data.get("bot") if isinstance(data, dict) else None)
+                if bot:
+                    try:
+                        until_str = datetime.fromtimestamp(mute_until).strftime("%H:%M")
+                        chat_id = event.message.chat.id if isinstance(event, CallbackQuery) else event.chat.id
+                        await bot.send_message(chat_id, f"Ты временно заблокирован за спам до {until_str}. Отдыхай 🍌")
+                    except Exception as e:
+                        logger.debug("Antiflood mute message: %s", e)
                 return
             
             if is_muted and mute_until and mute_until <= now:
