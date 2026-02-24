@@ -9,10 +9,11 @@ import sys
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
 
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
+from aiogram.filters import Command
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import ErrorEvent
 
@@ -102,16 +103,27 @@ async def register_routers(dp: Dispatcher):
         # В aiogram 3.x роутеры создаются через Router()
         # Пока handlers пустые, но структура готова для регистрации
         
-        # Базовые команды (help, start)
+        # Базовые команды (help, start, balance, top, report, admins, tutorial)
+        base_loaded = False
         try:
             from handlers import base
             if hasattr(base, 'router'):
                 dp.include_router(base.router)
                 logger.info("Роутер base зарегистрирован")
-        except ImportError:
-            logger.warning("Модуль handlers.base не найден, пропускаем")
+                base_loaded = True
+        except ImportError as e:
+            logger.warning("Модуль handlers.base не найден: %s", e, exc_info=True)
         except Exception as e:
-            logger.error(f"Ошибка регистрации роутера base: {e}")
+            logger.error("Ошибка регистрации роутера base: %s", e, exc_info=True)
+        if not base_loaded:
+            # Fallback: чтобы бот не игнорировал /start и /help при отсутствии base (например на сервере)
+            fallback_router = Router()
+            @fallback_router.message(Command("start"))
+            async def _fallback_start(msg): await msg.answer("Привет! Я Tehnolog Games. Используй /help для списка команд.")
+            @fallback_router.message(Command("help"))
+            async def _fallback_help(msg): await msg.answer("Команды: /start, /balance, /profile, /slot, /birzh, /bp, /tutorial, /season. Игры: /slot, /fracture, /minigames и др.")
+            dp.include_router(fallback_router)
+            logger.warning("Подключён fallback-роутер для /start и /help (handlers.base не загружен)")
 
         # Новости /news
         try:

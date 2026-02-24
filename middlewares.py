@@ -619,8 +619,12 @@ class TaxMiddleware(BaseMiddleware):
         super().__init__()
         self.tax_interval_hours = config.TAX_INTERVAL_HOURS
         self.tax_interval_seconds = self.tax_interval_hours * 3600
-        # Команды, которые работают даже при неуплаченном налоге
-        self.allowed_commands = ["/refill", "/help", "/helpgame", "/start", "/news"]
+        # Команды, которые работают даже при неуплаченном налоге (баланс, помощь, профиль — не блокируем)
+        self.allowed_commands = list(getattr(config, "FREE_COMMANDS", [])) or [
+            "/refill", "/help", "/helpgame", "/start", "/news", "/balance", "/top", "/admins", "/report", "/obnova", "/tutorial"
+        ]
+        if "/profile" not in self.allowed_commands:
+            self.allowed_commands.append("/profile")
     
     async def __call__(
         self,
