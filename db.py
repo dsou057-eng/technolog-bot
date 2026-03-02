@@ -2301,6 +2301,11 @@ class Database:
             """UPDATE tax_states SET last_tax_time = ?, tax_due = 0, is_paid = 1 WHERE user_id = ?""",
             (now, user_id)
         )
+        # Если строки не было (UPDATE затронул 0 строк) — создаём
+        await self.execute(
+            """INSERT OR IGNORE INTO tax_states (user_id, last_tax_time, tax_due, is_paid) VALUES (?, ?, 0, 1)""",
+            (user_id, now)
+        )
 
     async def pay_tax(self, user_id: int):
         """Оплата налога пользователем"""

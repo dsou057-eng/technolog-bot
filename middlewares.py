@@ -623,8 +623,9 @@ class TaxMiddleware(BaseMiddleware):
         self.allowed_commands = list(getattr(config, "FREE_COMMANDS", [])) or [
             "/refill", "/help", "/helpgame", "/start", "/news", "/balance", "/top", "/admins", "/report", "/obnova", "/tutorial"
         ]
-        if "/profile" not in self.allowed_commands:
-            self.allowed_commands.append("/profile")
+        for cmd in ["/profile", "/cancel", "/status"]:
+            if cmd not in self.allowed_commands:
+                self.allowed_commands.append(cmd)
     
     async def __call__(
         self,
