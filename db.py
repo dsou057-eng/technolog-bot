@@ -2293,7 +2293,15 @@ class Database:
                WHERE user_id = ?""",
             (tax_amount, now, user_id)
         )
-    
+
+    async def init_tax_timer(self, user_id: int):
+        """Старт таймера налога при первом заходе (не блокировать команды). Устанавливает last_tax_time, is_paid=1."""
+        now = int(datetime.now().timestamp())
+        await self.execute(
+            """UPDATE tax_states SET last_tax_time = ?, tax_due = 0, is_paid = 1 WHERE user_id = ?""",
+            (now, user_id)
+        )
+
     async def pay_tax(self, user_id: int):
         """Оплата налога пользователем"""
         await self.execute(

@@ -663,10 +663,9 @@ class TaxMiddleware(BaseMiddleware):
         tax_state = await db.get_tax_state(user_id)
         now = int(time.time())
         
-        # Инициализация при первом использовании
+        # Инициализация при первом использовании (старт 4-часового таймера, не блокировать команды)
         if tax_state["last_tax_time"] is None:
-            await db.set_tax_due(user_id, 0)
-            # Не блокируем команды при первой инициализации
+            await db.init_tax_timer(user_id)
             return await handler(event, data)
         
         # Проверяем, прошло ли 4 часа с последнего налога
